@@ -13,4 +13,4 @@ Last week, we landed [28 PRs](https://github.com/pingcap/tidb/pulls?utf8=%E2%9C%
 + Adjust the command line to support setting the listening address.
 + Prometheus metrics and golang pprof share the same port.
 + Update the  [Documents](https://github.com/pingcap/docs) repository.
-+ Fixed several bugs.
++ Fix several bugs.

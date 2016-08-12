@@ -12,7 +12,7 @@ Last week, we landed [27 PRs](https://github.com/pingcap/tidb/pulls?utf8=%E2%9C%
 + Add a [Documents](https://github.com/pingcap/docs) repository.
 + Supprt the [Hex Function](http://dev.mysql.com/doc/refman/5.7/en/string-functions.html#function_hex).
 + Simplify the compling and deployment for better usability.
-+ Fixed several bugs.
++ Fix several bugs.
 
 ## New Contributor
 [Huaiyu Xu](https://github.com/XuHuaiyu)
