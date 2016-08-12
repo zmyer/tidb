@@ -7,9 +7,9 @@ Last week, we landed [20 PRs](https://github.com/pingcap/tidb/pulls?utf8=%E2%9C%
 
 ## Notable changes to `TiDB`
 
-+ Rewrite Lexer and improve the speed of parsing SQL texts by 40%
-+ Add a command line flag for log output file and rotate log files regularly
-+ Optimize the 2 phase commit process and adopt faster methods to clear locks
-+ Optimize the execution speed of the `Insert On Duplicate Update` statement
++ Rewrite Lexer and improve the speed of parsing SQL texts by 40%.
++ Add a command line flag for log output file and rotate log files regularly.
++ Optimize the 2 phase commit process and adopt faster methods to clear locks.
++ Optimize the execution speed of the `Insert On Duplicate Update` statement.
 + Update the  [Documents](https://github.com/pingcap/docs) repository.
 + Fix several bugs.
