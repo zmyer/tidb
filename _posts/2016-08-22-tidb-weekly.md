@@ -10,7 +10,7 @@ Last week, we landed [26 PRs](https://github.com/pingcap/tidb/pulls?utf8=%E2%9C%
 + Upgrade the [query optimizer](https://github.com/pingcap/tidb/pull/1609).
 + Upgrade the [lexer](https://github.com/pingcap/tidb/pull/1566).
 + Replace golang protobuf with [gogo protobuf](https://github.com/pingcap/tidb/pull/1610).
-+Optimize the [distributed executor](https://github.com/pingcap/tidb/pull/1599).
++ Optimize the [distributed executor](https://github.com/pingcap/tidb/pull/1599).
 + Repair the [Time](https://github.com/pingcap/tidb/pull/1592) and [Decimal](https://github.com/pingcap/tidb/pull/1598) types to improve the compatibility with MySQL.
 + Support the [Set names binary](https://github.com/pingcap/tidb/pull/1578) statement.
 + Support [Covering Index](https://github.com/pingcap/tidb/pull/1567).
