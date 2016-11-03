@@ -27,6 +27,12 @@ var (
 	_ kv.Transaction = (*tikvTxn)(nil)
 )
 
+// Elapse is for evaluate txn time cost.
+type Elapse struct {
+	tag string
+	t   time.Time
+}
+
 // tikvTxn implements kv.Transaction.
 type tikvTxn struct {
 	us       kv.UnionStore
@@ -36,21 +42,48 @@ type tikvTxn struct {
 	valid    bool
 	lockKeys [][]byte
 	dirty    bool
+
+	elapses []Elapse
 }
 
 func newTiKVTxn(store *tikvStore) (*tikvTxn, error) {
+	var elapses []Elapse
+	elapses = append(elapses, Elapse{"init", time.Now()})
+
 	bo := NewBackoffer(tsoMaxBackoff)
 	startTS, err := store.getTimestampWithRetry(bo)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+	elapses = append(elapses, Elapse{"startTS", time.Now()})
 	ver := kv.NewVersion(startTS)
-	return &tikvTxn{
+	txn := &tikvTxn{
 		us:      kv.NewUnionStore(newTiKVSnapshot(store, ver)),
 		store:   store,
 		startTS: startTS,
 		valid:   true,
-	}, nil
+		elapses: elapses,
+	}
+
+	txn.Observe("finishNew")
+	return txn, nil
+}
+
+// Record an elapse.
+func (txn *tikvTxn) Observe(tag string) {
+	txn.elapses = append(txn.elapses, Elapse{
+		tag: tag,
+		t:   time.Now(),
+	})
+}
+
+// Print elapses if it costs too much.
+func (txn *tikvTxn) Dump() {
+	for i, e := range txn.elapses {
+		if i != 0 {
+			insertHistogram.WithLabelValues(e.tag).Observe(e.t.Sub(txn.elapses[i-1].t).Seconds())
+		}
+	}
 }
 
 // Implement transaction interface.
@@ -110,6 +143,7 @@ func (txn *tikvTxn) DelOption(opt kv.Option) {
 }
 
 func (txn *tikvTxn) Commit() error {
+	txn.Observe("startCommit")
 	if !txn.valid {
 		return kv.ErrInvalidTxn
 	}
@@ -119,9 +153,11 @@ func (txn *tikvTxn) Commit() error {
 	start := time.Now()
 	defer func() { txnCmdHistogram.WithLabelValues("commit").Observe(time.Since(start).Seconds()) }()
 
+	txn.Observe("startLazyCheck")
 	if err := txn.us.CheckLazyConditionPairs(); err != nil {
 		return errors.Trace(err)
 	}
+	txn.Observe("endLazyCheck")
 
 	committer, err := newTxnCommitter(txn)
 	if err != nil {
@@ -130,13 +166,19 @@ func (txn *tikvTxn) Commit() error {
 	if committer == nil {
 		return nil
 	}
+
+	txn.Observe("newCommitter")
 	err = committer.Commit()
 	if err != nil {
 		committer.writeFinishBinlog(binlog.BinlogType_Rollback, 0)
 		return errors.Trace(err)
 	}
+	txn.Observe("finishCommit")
 	committer.writeFinishBinlog(binlog.BinlogType_Commit, int64(committer.commitTS))
 	txn.commitTS = committer.commitTS
+	log.Debugf("[kv] finish commit txn %d", txn.StartTS())
+	txn.Observe("done")
+	txn.Dump()
 	return nil
 }
 

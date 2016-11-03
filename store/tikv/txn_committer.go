@@ -351,6 +351,7 @@ func (c *txnCommitter) Commit() error {
 			}()
 		}
 	}()
+	c.txn.Observe("committerStart")
 
 	binlogChan := c.prewriteBinlog()
 	err := c.prewriteKeys(NewBackoffer(prewriteMaxBackoff), c.keys)
@@ -360,6 +361,8 @@ func (c *txnCommitter) Commit() error {
 			return errors.Trace(binlogErr)
 		}
 	}
+
+	c.txn.Observe("finishPrewrite")
 	if err != nil {
 		log.Warnf("txn commit failed on prewrite: %v, tid: %d", err, c.startTS)
 		return errors.Trace(err)
@@ -372,10 +375,14 @@ func (c *txnCommitter) Commit() error {
 	}
 	c.commitTS = commitTS
 
+	c.txn.Observe("getCommitTS")
+
 	if c.store.oracle.IsExpired(c.startTS, maxTxnTimeUse) {
 		err = errors.Errorf("txn takes too much time, start: %d, commit: %d", c.startTS, c.commitTS)
 		return errors.Annotate(err, txnRetryableMark)
 	}
+
+	c.txn.Observe("checkCommitTS")
 
 	err = c.commitKeys(NewBackoffer(commitMaxBackoff), c.keys)
 	if err != nil {
@@ -385,6 +392,7 @@ func (c *txnCommitter) Commit() error {
 		}
 		log.Warnf("txn commit succeed with error: %v, tid: %d", err, c.startTS)
 	}
+	c.txn.Observe("finishCommitter")
 	return nil
 }
 

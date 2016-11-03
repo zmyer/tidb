@@ -159,6 +159,14 @@ var (
 			Help:      "Size of kv pairs to write in a transaction. (KB)",
 			Buckets:   prometheus.ExponentialBuckets(1, 2, 21),
 		})
+
+	insertHistogram = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "tidb",
+			Subsystem: "tikvclient",
+			Name:      "insert",
+			Help:      "Bucketed histogram of insert.",
+		}, []string{"stage"})
 )
 
 func reportRegionError(e *errorpb.Error) {
@@ -195,4 +203,5 @@ func init() {
 	prometheus.MustRegister(regionErrorCounter)
 	prometheus.MustRegister(txnWriteKVCountHistogram)
 	prometheus.MustRegister(txnWriteSizeHistogram)
+	prometheus.MustRegister(insertHistogram)
 }

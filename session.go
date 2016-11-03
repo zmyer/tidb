@@ -125,6 +125,8 @@ type session struct {
 	// For performance_schema only.
 	stmtState *perfschema.StatementState
 	parser    *parser.Parser
+
+	lastObserve time.Time
 }
 
 func (s *session) cleanRetryInfo() {
@@ -179,6 +181,8 @@ func (s *session) SetConnectionID(connectionID uint64) {
 }
 
 func (s *session) finishTxn(rollback bool) error {
+	s.observe("startFinish")
+	defer func() { s.observe("endFinish") }()
 	// transaction has already been committed or rolled back
 	if s.txn == nil {
 		return nil
@@ -403,6 +407,16 @@ func (s *session) GetGlobalSysVar(ctx context.Context, name string) (string, err
 	return sysVar, nil
 }
 
+func (s *session) onNewTxn() {
+	s.lastObserve = time.Now()
+}
+
+func (s *session) observe(tag string) {
+	now := time.Now()
+	insertHistogram.WithLabelValues(tag).Observe(now.Sub(s.lastObserve).Seconds())
+	s.lastObserve = now
+}
+
 // SetGlobalSysVar implements GlobalVarAccessor.SetGlobalSysVar interface.
 func (s *session) SetGlobalSysVar(ctx context.Context, name string, value string) error {
 	sql := fmt.Sprintf(`UPDATE  %s.%s SET VARIABLE_VALUE="%s" WHERE VARIABLE_NAME="%s";`,
@@ -427,10 +441,12 @@ func (s *session) ShouldAutocommit(ctx context.Context) bool {
 }
 
 func (s *session) ParseSQL(sql, charset, collation string) ([]ast.StmtNode, error) {
+	s.observe("beforeParse")
 	return s.parser.Parse(sql, charset, collation)
 }
 
 func (s *session) Execute(sql string) ([]ast.RecordSet, error) {
+	s.observe("beforeExecute")
 	if err := s.checkSchemaValidOrRollback(); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -475,6 +491,7 @@ func (s *session) Execute(sql string) ([]ast.RecordSet, error) {
 		// return the first recordset if client doesn't support ClientMultiResults.
 		rs = rs[:1]
 	}
+	s.observe("endExec")
 	return rs, nil
 }
 
@@ -579,6 +596,7 @@ func (s *session) GetTxn(forceNew bool) (kv.Transaction, error) {
 			return nil, errors.Trace(err)
 		}
 		s.resetHistory()
+		s.onNewTxn()
 		s.txn, err = s.store.Begin()
 		if err != nil {
 			return nil, errors.Trace(err)
@@ -593,6 +611,7 @@ func (s *session) GetTxn(forceNew bool) (kv.Transaction, error) {
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
+		s.onNewTxn()
 		s.txn, err = s.store.Begin()
 		if err != nil {
 			return nil, errors.Trace(err)
@@ -607,6 +626,7 @@ func (s *session) GetTxn(forceNew bool) (kv.Transaction, error) {
 	if retryInfo.Retrying {
 		s.txn.SetOption(kv.RetryAttempts, retryInfo.Attempts)
 	}
+	s.observe("endGetTxn")
 	return s.txn, nil
 }
 

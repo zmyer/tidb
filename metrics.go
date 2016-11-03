@@ -42,10 +42,19 @@ var (
 			Help:      "Bucketed histogram of processing time (s) in running executor.",
 			Buckets:   prometheus.ExponentialBuckets(0.0001, 2, 13),
 		})
+
+	insertHistogram = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "tidb",
+			Subsystem: "server",
+			Name:      "insert",
+			Help:      "Bucketed histogram of insert.",
+		}, []string{"stage"})
 )
 
 func init() {
 	prometheus.MustRegister(sessionExecuteParseDuration)
 	prometheus.MustRegister(sessionExecuteCompileDuration)
 	prometheus.MustRegister(sessionExecuteRunDuration)
+	prometheus.MustRegister(insertHistogram)
 }
