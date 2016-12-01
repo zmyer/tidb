@@ -31,6 +31,8 @@ const (
 	RetryAttempts
 	// BinlogData is the binlog data to write.
 	BinlogData
+	// Use one phase committer.
+	OnePC
 )
 
 // Retriever is the interface wraps the basic Get and Seek methods.

@@ -119,6 +119,7 @@ const (
 	prewriteMaxBackoff      = 10000
 	commitMaxBackoff        = 10000
 	cleanupMaxBackoff       = 10000
+	importDataMaxBackoff    = 10000
 	gcMaxBackoff            = 100000
 	gcResolveLockMaxBackoff = 100000
 	rawkvMaxBackoff         = 5000

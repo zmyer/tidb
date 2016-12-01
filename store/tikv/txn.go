@@ -124,21 +124,37 @@ func (txn *tikvTxn) Commit() error {
 		return errors.Trace(err)
 	}
 
-	committer, err := newTwoPhaseCommitter(txn)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if committer == nil {
+	onePC := txn.us.GetOption(kv.OnePC).(bool)
+	if onePC {
+		committer, err := newOnePhaseCommitter(txn)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if committer == nil {
+			return nil
+		}
+		err = committer.execute()
+		if err != nil {
+			return errors.Trace(err)
+		}
+		return nil
+	} else {
+		committer, err := newTwoPhaseCommitter(txn)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if committer == nil {
+			return nil
+		}
+		err = committer.execute()
+		if err != nil {
+			committer.writeFinishBinlog(binlog.BinlogType_Rollback, 0)
+			return errors.Trace(err)
+		}
+		committer.writeFinishBinlog(binlog.BinlogType_Commit, int64(committer.commitTS))
+		txn.commitTS = committer.commitTS
 		return nil
 	}
-	err = committer.execute()
-	if err != nil {
-		committer.writeFinishBinlog(binlog.BinlogType_Rollback, 0)
-		return errors.Trace(err)
-	}
-	committer.writeFinishBinlog(binlog.BinlogType_Commit, int64(committer.commitTS))
-	txn.commitTS = committer.commitTS
-	return nil
 }
 
 func (txn *tikvTxn) close() error {

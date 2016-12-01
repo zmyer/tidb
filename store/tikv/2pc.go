@@ -108,7 +108,7 @@ func newTwoPhaseCommitter(txn *tikvTxn) (*twoPhaseCommitter, error) {
 
 	// Increase lockTTL for large transactions.
 	// The formula is `ttl = ttlFactor * sqrt(sizeInMiB)`.
-	// When writeSize <= 256K, ttl is defaultTTL (3s);
+	// When writeSize <= 4K, ttl is defaultTTL (3s);
 	// When writeSize is 1MiB, 100MiB, or 400MiB, ttl is 6s, 60s, 120s correspondingly;
 	// When writeSize >= 400MiB, ttl is maxTTL (120s).
 	var lockTTL uint64
