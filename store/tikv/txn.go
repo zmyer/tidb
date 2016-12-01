@@ -124,8 +124,8 @@ func (txn *tikvTxn) Commit() error {
 		return errors.Trace(err)
 	}
 
-	onePC := txn.us.GetOption(kv.OnePC).(bool)
-	if onePC {
+	onePC := txn.us.GetOption(kv.OnePC)
+	if onePC != nil {
 		committer, err := newOnePhaseCommitter(txn)
 		if err != nil {
 			return errors.Trace(err)
