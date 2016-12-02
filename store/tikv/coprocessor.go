@@ -452,12 +452,6 @@ func (it *copIterator) handleTask(bo *Backoffer, task *copTask) (*coprocessor.Re
 			if notLeader := e.GetNotLeader(); notLeader != nil {
 				log.Warnf("tikv reports `NotLeader`: %s, ctx: %s, retry later", notLeader, req.Context)
 				it.store.regionCache.UpdateLeader(task.region.VerID(), notLeader.GetLeader().GetId())
-			} else if staleEpoch := e.GetStaleEpoch(); staleEpoch != nil {
-				log.Warnf("tikv reports `StaleEpoch`, ctx: %s, retry later", req.Context)
-				err = it.store.regionCache.OnRegionStale(task.region, staleEpoch.NewRegions)
-				if err != nil {
-					return nil, errors.Trace(err)
-				}
 			} else {
 				log.Warnf("tikv reports region error: %s, ctx: %s, retry later", e, req.Context)
 				it.store.regionCache.DropRegion(task.region.VerID())

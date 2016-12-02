@@ -134,9 +134,9 @@ func (h *rpcHandler) checkContext(ctx *kvrpcpb.Context) *errorpb.Error {
 			newRegions = append(newRegions, nextRegion)
 		}
 		return &errorpb.Error{
-			Message: proto.String("stale epoch"),
+			Message:    proto.String("stale epoch"),
 			StaleEpoch: &errorpb.StaleEpoch{
-				NewRegions: newRegions,
+			//NewRegions: newRegions,
 			},
 		}
 	}

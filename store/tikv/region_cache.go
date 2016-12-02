@@ -242,22 +242,22 @@ func (c *RegionCache) loadRegion(bo *Backoffer, key []byte) (*Region, error) {
 }
 
 // OnRegionStale removes the old region and inserts new regions into the cache.
-func (c *RegionCache) OnRegionStale(old *Region, newRegions []*metapb.Region) error {
+func (c *RegionCache) OnRegionStale(old *Region, updatedRegions []*kvrpcpb.UpdatedRegion) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.dropRegionFromCache(old.VerID())
 
-	for _, meta := range newRegions {
+	for _, r := range updatedRegions {
 		if _, ok := c.pdClient.(*codecPDClient); ok {
-			if err := decodeRegionMetaKey(meta); err != nil {
-				return errors.Errorf("newRegion's range key is not encoded: %v, %v", meta, err)
+			if err := decodeRegionMetaKey(r.Region); err != nil {
+				return errors.Errorf("newRegion's range key is not encoded: %v, %v", r.Region, err)
 			}
 		}
-		moveLeaderToFirst(meta, old.peer.GetStoreId())
-		leader := meta.Peers[0]
+		moveLeaderToFirst(r.Region, old.peer.GetStoreId())
+		leader := r.Region.Peers[0]
 		c.insertRegionToCache(&Region{
-			meta: meta,
+			meta: r.Region,
 			peer: leader,
 			addr: old.GetAddress(),
 		})

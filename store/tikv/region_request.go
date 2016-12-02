@@ -53,6 +53,9 @@ func sendKVReq(regionCache *RegionCache, rpcClient Client, bo *Backoffer, req *k
 			}
 			continue
 		}
+		if updatedRegions := resp.GetUpdatedRegions(); len(updatedRegions) > 0 {
+			regionCache.OnRegionStale(region, updatedRegions)
+		}
 		if regionErr := resp.GetRegionError(); regionErr != nil {
 			reportRegionError(regionErr)
 			// Retry if error is `NotLeader`.
@@ -64,14 +67,6 @@ func sendKVReq(regionCache *RegionCache, rpcClient Client, bo *Backoffer, req *k
 					if err != nil {
 						return nil, errors.Trace(err)
 					}
-				}
-				continue
-			}
-			if staleEpoch := regionErr.GetStaleEpoch(); staleEpoch != nil {
-				log.Warnf("tikv reports `StaleEpoch`, ctx: %s, retry later", req.Context)
-				err = regionCache.OnRegionStale(region, staleEpoch.NewRegions)
-				if err != nil {
-					return nil, errors.Trace(err)
 				}
 				continue
 			}
