@@ -20,6 +20,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/juju/errors"
 	"github.com/pingcap/kvproto/pkg/coprocessor"
+	"github.com/pingcap/kvproto/pkg/errorpb"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/tidb/distsql"
 	"github.com/pingcap/tidb/distsql/xeval"
@@ -50,19 +51,21 @@ type selectContext struct {
 }
 
 func (h *rpcHandler) handleCopRequest(req *coprocessor.Request) (*coprocessor.Response, error) {
-	resp := &coprocessor.Response{}
-	if err := h.checkContext(req.GetContext()); err != nil {
+	var resp coprocessor.Response
+	var err *errorpb.Error
+	resp.UpdatedRegions, err = h.checkContext(req.GetContext())
+	if err != nil {
 		resp.RegionError = err
-		return resp, nil
+		return &resp, nil
 	}
 	if len(req.Ranges) == 0 {
-		return resp, nil
+		return &resp, nil
 	}
 	if req.GetTp() == kv.ReqTypeSelect || req.GetTp() == kv.ReqTypeIndex {
 		sel := new(tipb.SelectRequest)
 		err := proto.Unmarshal(req.Data, sel)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return &resp, errors.Trace(err)
 		}
 		ctx := &selectContext{
 			sel:       sel,
@@ -124,11 +127,11 @@ func (h *rpcHandler) handleCopRequest(req *coprocessor.Request) (*coprocessor.Re
 		}
 		data, err := proto.Marshal(selResp)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return &resp, errors.Trace(err)
 		}
 		resp.Data = data
 	}
-	return resp, nil
+	return &resp, nil
 }
 
 func (h *rpcHandler) getRowsFromAgg(ctx *selectContext) ([]tipb.Chunk, error) {

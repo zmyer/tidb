@@ -148,6 +148,9 @@ func (s *RegionRequestSender) sendKVReqToRegion(ctx *RPCContext, req *kvrpcpb.Re
 		}
 		return nil, true, nil
 	}
+	if updatedRegions := resp.GetUpdatedRegions(); len(updatedRegions) > 0 {
+		s.regionCache.OnRegionUpdated(updatedRegions)
+	}
 	return
 }
 
@@ -159,6 +162,9 @@ func (s *RegionRequestSender) sendCopReqToRegion(ctx *RPCContext, req *coprocess
 			return nil, false, errors.Trace(err)
 		}
 		return nil, true, nil
+	}
+	if updatedRegions := resp.GetUpdatedRegions(); len(updatedRegions) > 0 {
+		s.regionCache.OnRegionUpdated(updatedRegions)
 	}
 	return
 }
@@ -182,11 +188,6 @@ func (s *RegionRequestSender) onRegionError(ctx *RPCContext, regionErr *errorpb.
 			}
 		}
 		return true, nil
-	}
-	if staleEpoch := regionErr.GetStaleEpoch(); staleEpoch != nil {
-		log.Warnf("tikv reports `StaleEpoch`, ctx: %s, retry later", ctx.KVCtx)
-		err = s.regionCache.OnRegionStale(ctx, staleEpoch.NewRegions)
-		return false, errors.Trace(err)
 	}
 	if regionErr.GetServerIsBusy() != nil {
 		log.Warnf("tikv reports `ServerIsBusy`, ctx: %s, retry later", ctx.KVCtx)

@@ -44,7 +44,9 @@ func newRPCHandler(cluster *Cluster, mvccStore *MvccStore, storeID uint64) *rpcH
 
 func (h *rpcHandler) handleRequest(req *kvrpcpb.Request) *kvrpcpb.Response {
 	var resp kvrpcpb.Response
-	if err := h.checkContext(req.GetContext()); err != nil {
+	var err *errorpb.Error
+	resp.UpdatedRegions, err = h.checkContext(req.GetContext())
+	if err != nil {
 		resp.RegionError = err
 		return &resp
 	}
@@ -77,11 +79,12 @@ func (h *rpcHandler) handleRequest(req *kvrpcpb.Request) *kvrpcpb.Response {
 	return &resp
 }
 
-func (h *rpcHandler) checkContext(ctx *kvrpcpb.Context) *errorpb.Error {
+func (h *rpcHandler) checkContext(ctx *kvrpcpb.Context) ([]*kvrpcpb.UpdatedRegion, *errorpb.Error) {
+	var updatedRegions []*kvrpcpb.UpdatedRegion
 	region, leaderID := h.cluster.GetRegion(ctx.GetRegionId())
 	// No region found.
 	if region == nil {
-		return &errorpb.Error{
+		return updatedRegions, &errorpb.Error{
 			Message: proto.String("region not found"),
 			RegionNotFound: &errorpb.RegionNotFound{
 				RegionId: proto.Uint64(ctx.GetRegionId()),
@@ -99,7 +102,7 @@ func (h *rpcHandler) checkContext(ctx *kvrpcpb.Context) *errorpb.Error {
 	}
 	// The Store does not contain a Peer of the Region.
 	if storePeer == nil {
-		return &errorpb.Error{
+		return updatedRegions, &errorpb.Error{
 			Message: proto.String("region not found"),
 			RegionNotFound: &errorpb.RegionNotFound{
 				RegionId: proto.Uint64(ctx.GetRegionId()),
@@ -108,7 +111,7 @@ func (h *rpcHandler) checkContext(ctx *kvrpcpb.Context) *errorpb.Error {
 	}
 	// No leader.
 	if leaderPeer == nil {
-		return &errorpb.Error{
+		return updatedRegions, &errorpb.Error{
 			Message: proto.String("no leader"),
 			NotLeader: &errorpb.NotLeader{
 				RegionId: proto.Uint64(ctx.GetRegionId()),
@@ -117,7 +120,7 @@ func (h *rpcHandler) checkContext(ctx *kvrpcpb.Context) *errorpb.Error {
 	}
 	// The Peer on the Store is not leader.
 	if storePeer.GetId() != leaderPeer.GetId() {
-		return &errorpb.Error{
+		return updatedRegions, &errorpb.Error{
 			Message: proto.String("not leader"),
 			NotLeader: &errorpb.NotLeader{
 				RegionId: proto.Uint64(ctx.GetRegionId()),
@@ -127,20 +130,25 @@ func (h *rpcHandler) checkContext(ctx *kvrpcpb.Context) *errorpb.Error {
 	}
 	// Region epoch does not match.
 	if !proto.Equal(region.GetRegionEpoch(), ctx.GetRegionEpoch()) {
-		nextRegion, _ := h.cluster.GetRegionByKey(region.GetEndKey())
-		newRegions := []*metapb.Region{region}
-		if nextRegion != nil {
-			newRegions = append(newRegions, nextRegion)
+		updatedRegion := &kvrpcpb.UpdatedRegion{
+			Region: region,
+			Leader: storePeer,
 		}
-		return &errorpb.Error{
-			Message: proto.String("stale epoch"),
-			StaleEpoch: &errorpb.StaleEpoch{
-				NewRegions: newRegions,
-			},
+		updatedRegions = append(updatedRegions, updatedRegion)
+		if nextRegion, leader := h.cluster.GetRegionByKey(region.GetEndKey()); nextRegion != nil {
+			updatedRegion := &kvrpcpb.UpdatedRegion{
+				Region: nextRegion,
+				Leader: leader,
+			}
+			updatedRegions = append(updatedRegions, updatedRegion)
+		}
+		return updatedRegions, &errorpb.Error{
+			Message:    proto.String("stale epoch"),
+			StaleEpoch: &errorpb.StaleEpoch{},
 		}
 	}
 	h.startKey, h.endKey = region.StartKey, region.EndKey
-	return nil
+	return updatedRegions, nil
 }
 
 func (h *rpcHandler) keyInRegion(key []byte) bool {
