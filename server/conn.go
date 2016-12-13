@@ -567,7 +567,7 @@ func (cc *clientConn) handleLoadData(loadDataInfo *executor.LoadDataInfo) error 
 	return nil
 }
 
-const queryLogMaxLen = 2048
+const queryLogMaxLen = 2048 * 2
 
 // handleQuery executes the sql query string and writes result set or result ok to the client.
 // As the execution time of this function represents the performance of TiDB, we do time log and metrics here.
@@ -583,7 +583,9 @@ func (cc *clientConn) handleQuery(sql string) (err error) {
 		}
 		queryCounter.WithLabelValues(label).Inc()
 	}()
-
+	if strings.Contains(sql, "SELECT") {
+		log.Warnf("[%d][SELECT_QUERY] %s", cc.connectionID, sql)
+	}
 	rs, err := cc.ctx.Execute(sql)
 	if err != nil {
 		return errors.Trace(err)
