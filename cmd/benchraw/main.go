@@ -20,6 +20,7 @@ import (
 	_ "net/http/pprof"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/juju/errors"
@@ -31,34 +32,60 @@ var (
 	dataCnt   = flag.Int("N", 1000000, "data num")
 	workerCnt = flag.Int("C", 100, "concurrent num")
 	pdAddr    = flag.String("pd", "localhost:2379", "pd address:localhost:2379")
+	prefix    = flag.String("prefix", "key", "bench key prefix")
 	valueSize = flag.Int("V", 5, "value size in byte")
 )
 
-// blind put bench
 func batchRawPut(value []byte) {
 	cli, err := tikv.NewRawKVClient(strings.Split(*pdAddr, ","))
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	progress := make(chan int)
+
 	wg := sync.WaitGroup{}
 	base := *dataCnt / *workerCnt
 	wg.Add(*workerCnt)
+
+	var cnt uint64 = 0
 	for i := 0; i < *workerCnt; i++ {
 		go func(i int) {
 			defer wg.Done()
-
 			for j := 0; j < base; j++ {
 				k := base*i + j
-				key := fmt.Sprintf("key_%d", k)
+				key := fmt.Sprintf("%s_%d", *prefix, k)
 				err = cli.Put([]byte(key), value)
 				if err != nil {
 					log.Fatal(errors.ErrorStack(err))
 				}
+				if j%100 == 0 {
+					atomic.AddUint64(&cnt, 100)
+				}
 			}
 		}(i)
 	}
+
+	// show speed
+	go func() {
+		tick := time.Tick(2 * time.Second)
+		lastCnt := atomic.LoadUint64(&cnt)
+		lastTime := time.Now()
+
+		for range tick {
+			cur := atomic.LoadUint64(&cnt)
+
+			delta := float64(cur - lastCnt)
+			elapse := float64(time.Since(lastTime)) / float64(time.Second)
+			fmt.Printf("speed: %v\n", delta/float64(elapse))
+
+			lastTime = time.Now()
+			lastCnt = cur
+		}
+	}()
+
 	wg.Wait()
+	close(progress)
 }
 
 func main() {
