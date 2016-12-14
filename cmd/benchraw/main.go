@@ -16,6 +16,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math/rand"
 	"net/http"
 	_ "net/http/pprof"
 	"strings"
@@ -32,9 +33,34 @@ var (
 	dataCnt   = flag.Int("N", 1000000, "data num")
 	workerCnt = flag.Int("C", 100, "concurrent num")
 	pdAddr    = flag.String("pd", "localhost:2379", "pd address:localhost:2379")
-	prefix    = flag.String("prefix", "key", "bench key prefix")
 	valueSize = flag.Int("V", 5, "value size in byte")
 )
+
+var src = rand.NewSource(time.Now().UnixNano())
+
+const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+const (
+	letterIdxBits = 6                    // 6 bits to represent a letter index
+	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
+	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
+)
+
+func randStr(n int) string {
+	b := make([]byte, n)
+	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
+		if remain == 0 {
+			cache, remain = src.Int63(), letterIdxMax
+		}
+		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
+			b[i] = letterBytes[idx]
+			i--
+		}
+		cache >>= letterIdxBits
+		remain--
+	}
+
+	return string(b)
+}
 
 func batchRawPut(value []byte) {
 	cli, err := tikv.NewRawKVClient(strings.Split(*pdAddr, ","))
@@ -53,8 +79,7 @@ func batchRawPut(value []byte) {
 		go func(i int) {
 			defer wg.Done()
 			for j := 0; j < base; j++ {
-				k := base*i + j
-				key := fmt.Sprintf("%s_%d", *prefix, k)
+				key := randStr(10)
 				err = cli.Put([]byte(key), value)
 				if err != nil {
 					log.Fatal(errors.ErrorStack(err))
