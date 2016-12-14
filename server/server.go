@@ -121,7 +121,7 @@ func (s *Server) skipAuth() bool {
 	return s.cfg.SkipAuth
 }
 
-const tokenLimit = 1000
+const tokenLimit = 10000
 
 // NewServer creates a new Server.
 func NewServer(cfg *Config, driver IDriver) (*Server, error) {
