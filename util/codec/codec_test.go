@@ -235,11 +235,6 @@ func (s *testCodecSuite) TestNumberCodec(c *C) {
 		c.Assert(err, IsNil)
 		c.Assert(v, Equals, t)
 
-		b = EncodeVarint(nil, t)
-		_, v, err = DecodeVarint(b)
-		c.Assert(err, IsNil)
-		c.Assert(v, Equals, t)
-
 		b = EncodeComparableVarint(nil, t)
 		_, v, err = DecodeComparableVarint(b)
 		c.Assert(err, IsNil)
@@ -270,11 +265,6 @@ func (s *testCodecSuite) TestNumberCodec(c *C) {
 
 		b = EncodeUintDesc(nil, t)
 		_, v, err = DecodeUintDesc(b)
-		c.Assert(err, IsNil)
-		c.Assert(v, Equals, t)
-
-		b = EncodeUvarint(nil, t)
-		_, v, err = DecodeUvarint(b)
 		c.Assert(err, IsNil)
 		c.Assert(v, Equals, t)
 

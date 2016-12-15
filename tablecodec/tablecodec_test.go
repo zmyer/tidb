@@ -16,6 +16,7 @@ package tablecodec
 import (
 	"testing"
 
+	"github.com/juju/errors"
 	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/mysql"
 	"github.com/pingcap/tidb/sessionctx/variable"
@@ -35,7 +36,7 @@ type testTableCodecSuite struct{}
 // TODO: add more tests.
 func (s *testTableCodecSuite) TestTableCodec(c *C) {
 	defer testleak.AfterTest(c)()
-	key := EncodeRowKey(1, codec.EncodeInt(nil, 2))
+	key := EncodeRowKey(1, codec.EncodeComparableVarint(nil, 2))
 	h, err := DecodeRowKey(key)
 	c.Assert(err, IsNil)
 	c.Assert(h, Equals, int64(2))
@@ -79,7 +80,7 @@ func (s *testTableCodecSuite) TestRowCodec(c *C) {
 		colMap[col.id] = col.tp
 	}
 	r, err := DecodeRow(bs, colMap)
-	c.Assert(err, IsNil)
+	c.Assert(errors.ErrorStack(err), Equals, "")
 	c.Assert(r, NotNil)
 	c.Assert(r, HasLen, 3)
 	sc := new(variable.StatementContext)

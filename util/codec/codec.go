@@ -14,7 +14,6 @@
 package codec
 
 import (
-	"encoding/binary"
 	"time"
 
 	"github.com/juju/errors"
@@ -36,51 +35,48 @@ const (
 	maxFlag          byte = 250
 )
 
-func encode(b []byte, vals []types.Datum, comparable bool) ([]byte, error) {
-	for _, val := range vals {
-		switch val.Kind() {
-		case types.KindInt64:
-			b = encodeSignedInt(b, val.GetInt64(), comparable)
-		case types.KindUint64:
-			b = encodeUnsignedInt(b, val.GetUint64(), comparable)
-		case types.KindFloat32, types.KindFloat64:
-			b = append(b, floatFlag)
-			b = EncodeFloat(b, val.GetFloat64())
-		case types.KindString, types.KindBytes:
-			b = encodeBytes(b, val.GetBytes(), comparable)
-		case types.KindMysqlTime:
-			b = append(b, uintFlag)
-			v, err := val.GetMysqlTime().ToPackedUint()
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			b = EncodeUint(b, v)
-		case types.KindMysqlDuration:
-			// duration may have negative value, so we cannot use String to encode directly.
-			b = append(b, durationFlag)
-			b = EncodeInt(b, int64(val.GetMysqlDuration().Duration))
-		case types.KindMysqlDecimal:
-			b = append(b, decimalFlag)
-			b = EncodeDecimal(b, val)
-		case types.KindMysqlHex:
-			b = encodeSignedInt(b, int64(val.GetMysqlHex().ToNumber()), comparable)
-		case types.KindMysqlBit:
-			b = encodeUnsignedInt(b, uint64(val.GetMysqlBit().ToNumber()), comparable)
-		case types.KindMysqlEnum:
-			b = encodeUnsignedInt(b, uint64(val.GetMysqlEnum().ToNumber()), comparable)
-		case types.KindMysqlSet:
-			b = encodeUnsignedInt(b, uint64(val.GetMysqlSet().ToNumber()), comparable)
-		case types.KindNull:
-			b = append(b, NilFlag)
-		case types.KindMinNotNull:
-			b = append(b, bytesFlag)
-		case types.KindMaxValue:
-			b = append(b, maxFlag)
-		default:
-			return nil, errors.Errorf("unsupport encode type %d", val.Kind())
+func encode(b []byte, val types.Datum, comparable bool) ([]byte, error) {
+	switch val.Kind() {
+	case types.KindInt64:
+		b = encodeSignedInt(b, val.GetInt64())
+	case types.KindUint64:
+		b = encodeUnsignedInt(b, val.GetUint64())
+	case types.KindFloat32, types.KindFloat64:
+		b = append(b, floatFlag)
+		b = EncodeFloat(b, val.GetFloat64())
+	case types.KindString, types.KindBytes:
+		b = encodeBytes(b, val.GetBytes(), comparable)
+	case types.KindMysqlTime:
+		b = append(b, uintFlag)
+		v, err := val.GetMysqlTime().ToPackedUint()
+		if err != nil {
+			return nil, errors.Trace(err)
 		}
+		b = EncodeUint(b, v)
+	case types.KindMysqlDuration:
+		// duration may have negative value, so we cannot use String to encode directly.
+		b = append(b, durationFlag)
+		b = EncodeInt(b, int64(val.GetMysqlDuration().Duration))
+	case types.KindMysqlDecimal:
+		b = append(b, decimalFlag)
+		b = EncodeDecimal(b, val)
+	case types.KindMysqlHex:
+		b = encodeSignedInt(b, int64(val.GetMysqlHex().ToNumber()))
+	case types.KindMysqlBit:
+		b = encodeUnsignedInt(b, uint64(val.GetMysqlBit().ToNumber()))
+	case types.KindMysqlEnum:
+		b = encodeUnsignedInt(b, uint64(val.GetMysqlEnum().ToNumber()))
+	case types.KindMysqlSet:
+		b = encodeUnsignedInt(b, uint64(val.GetMysqlSet().ToNumber()))
+	case types.KindNull:
+		b = append(b, NilFlag)
+	case types.KindMinNotNull:
+		b = append(b, bytesFlag)
+	case types.KindMaxValue:
+		b = append(b, maxFlag)
+	default:
+		return nil, errors.Errorf("unsupport encode type %d", val.Kind())
 	}
-
 	return b, nil
 }
 
@@ -95,25 +91,15 @@ func encodeBytes(b []byte, v []byte, comparable bool) []byte {
 	return b
 }
 
-func encodeSignedInt(b []byte, v int64, comaprable bool) []byte {
-	if comaprable {
-		b = append(b, intFlag)
-		b = EncodeInt(b, v)
-	} else {
-		b = append(b, varintFlag)
-		b = EncodeVarint(b, v)
-	}
+func encodeSignedInt(b []byte, v int64) []byte {
+	b = append(b, varintFlag)
+	b = EncodeComparableVarint(b, v)
 	return b
 }
 
-func encodeUnsignedInt(b []byte, v uint64, comparable bool) []byte {
-	if comparable {
-		b = append(b, uintFlag)
-		b = EncodeUint(b, v)
-	} else {
-		b = append(b, uvarintFlag)
-		b = EncodeUvarint(b, v)
-	}
+func encodeUnsignedInt(b []byte, v uint64) []byte {
+	b = append(b, uvarintFlag)
+	b = EncodeComparableUvarint(b, v)
 	return b
 }
 
@@ -121,13 +107,27 @@ func encodeUnsignedInt(b []byte, v uint64, comparable bool) []byte {
 // slice. It guarantees the encoded value is in ascending order for comparison.
 // For Decimal type, datum must set datum's length and frac.
 func EncodeKey(b []byte, v ...types.Datum) ([]byte, error) {
-	return encode(b, v, true)
+	for _, val := range v {
+		var err error
+		b, err = encode(b, val, true)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+	}
+	return b, nil
 }
 
 // EncodeValue appends the encoded values to byte slice b, returning the appended
 // slice. It does not guarantee the order for comparison.
 func EncodeValue(b []byte, v ...types.Datum) ([]byte, error) {
-	return encode(b, v, false)
+	for _, val := range v {
+		var err error
+		b, err = encode(b, val, false)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+	}
+	return b, nil
 }
 
 // Decode decodes values from a byte slice generated with EncodeKey or EncodeValue
@@ -174,11 +174,11 @@ func DecodeOne(b []byte) (remain []byte, d types.Datum, err error) {
 		d.SetUint64(v)
 	case varintFlag:
 		var v int64
-		b, v, err = DecodeVarint(b)
+		b, v, err = DecodeComparableVarint(b)
 		d.SetInt64(v)
 	case uvarintFlag:
 		var v uint64
-		b, v, err = DecodeUvarint(b)
+		b, v, err = DecodeComparableUvarint(b)
 		d.SetUint64(v)
 	case floatFlag:
 		var v float64
@@ -242,10 +242,8 @@ func peek(b []byte) (length int, err error) {
 		l, err = peekCompactBytes(b)
 	case decimalFlag:
 		l, err = types.DecimalPeak(b)
-	case varintFlag:
+	case varintFlag, uvarintFlag:
 		l, err = peekVarint(b)
-	case uvarintFlag:
-		l, err = peekUvarint(b)
 	default:
 		return 0, errors.Errorf("invalid encoded key flag %v", flag)
 	}
@@ -254,6 +252,19 @@ func peek(b []byte) (length int, err error) {
 	}
 	length += l
 	return
+}
+
+func peekComparableVarint(b []byte) (int, error) {
+	if len(b) == 0 {
+		return 0, errors.New("insufficient bytes to decode value")
+	}
+	first := int(b[0])
+	if first < negativeTagEnd {
+		return negativeTagEnd - first + 1, nil
+	} else if first > positiveTagStart {
+		return first - positiveTagStart + 1, nil
+	}
+	return 1, nil
 }
 
 func peekBytes(b []byte, reverse bool) (int, error) {
@@ -282,31 +293,29 @@ func peekBytes(b []byte, reverse bool) (int, error) {
 
 func peekCompactBytes(b []byte) (int, error) {
 	// Get length.
-	v, n := binary.Varint(b)
-	vi := int(v)
-	if n < 0 {
-		return 0, errors.New("value larger than 64 bits")
-	} else if n == 0 {
-		return 0, errors.New("insufficient bytes to decode value")
+	remained, v, err := DecodeComparableVarint(b)
+	if err != nil {
+		return 0, errors.Trace(err)
 	}
-	if len(b) < vi+n {
-		return 0, errors.Errorf("insufficient bytes to decode value, expected length: %v", n)
+	if v < 0 {
+		return 0, errors.Trace(errDecodeInvalid)
 	}
-	return n + vi, nil
+	l := len(b) - len(remained) + int(v)
+	if len(b) < l {
+		return 0, errors.Trace(errDecodeInsufficient)
+	}
+	return l, nil
 }
 
 func peekVarint(b []byte) (int, error) {
-	_, n := binary.Varint(b)
-	if n < 0 {
-		return 0, errors.New("value larger than 64 bits")
+	if len(b) == 0 {
+		return 0, errors.New("insufficient bytes to decode value")
 	}
-	return n, nil
-}
-
-func peekUvarint(b []byte) (int, error) {
-	_, n := binary.Uvarint(b)
-	if n < 0 {
-		return 0, errors.New("value larger than 64 bits")
+	first := int(b[0])
+	if first < negativeTagEnd {
+		return negativeTagEnd - first + 1, nil
+	} else if first > positiveTagStart {
+		return first - positiveTagStart + 1, nil
 	}
-	return n, nil
+	return 1, nil
 }

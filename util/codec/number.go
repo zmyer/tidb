@@ -115,47 +115,47 @@ func DecodeUintDesc(b []byte) ([]byte, uint64, error) {
 	return b, ^v, nil
 }
 
-// EncodeVarint appends the encoded value to slice b and returns the appended slice.
-// Note that the encoded result is not memcomparable.
-func EncodeVarint(b []byte, v int64) []byte {
-	var data [binary.MaxVarintLen64]byte
-	n := binary.PutVarint(data[:], v)
-	return append(b, data[:n]...)
-}
-
-// DecodeVarint decodes value encoded by EncodeVarint before.
-// It returns the leftover un-decoded slice, decoded value if no error.
-func DecodeVarint(b []byte) ([]byte, int64, error) {
-	v, n := binary.Varint(b)
-	if n > 0 {
-		return b[n:], v, nil
-	}
-	if n < 0 {
-		return nil, 0, errors.New("value larger than 64 bits")
-	}
-	return nil, 0, errors.New("insufficient bytes to decode value")
-}
-
-// EncodeUvarint appends the encoded value to slice b and returns the appended slice.
-// Note that the encoded result is not memcomparable.
-func EncodeUvarint(b []byte, v uint64) []byte {
-	var data [binary.MaxVarintLen64]byte
-	n := binary.PutUvarint(data[:], v)
-	return append(b, data[:n]...)
-}
-
-// DecodeUvarint decodes value encoded by EncodeUvarint before.
-// It returns the leftover un-decoded slice, decoded value if no error.
-func DecodeUvarint(b []byte) ([]byte, uint64, error) {
-	v, n := binary.Uvarint(b)
-	if n > 0 {
-		return b[n:], v, nil
-	}
-	if n < 0 {
-		return nil, 0, errors.New("value larger than 64 bits")
-	}
-	return nil, 0, errors.New("insufficient bytes to decode value")
-}
+//// EncodeVarint appends the encoded value to slice b and returns the appended slice.
+//// Note that the encoded result is not memcomparable.
+//func EncodeVarint(b []byte, v int64) []byte {
+//	var data [binary.MaxVarintLen64]byte
+//	n := binary.PutVarint(data[:], v)
+//	return append(b, data[:n]...)
+//}
+//
+//// DecodeVarint decodes value encoded by EncodeVarint before.
+//// It returns the leftover un-decoded slice, decoded value if no error.
+//func DecodeVarint(b []byte) ([]byte, int64, error) {
+//	v, n := binary.Varint(b)
+//	if n > 0 {
+//		return b[n:], v, nil
+//	}
+//	if n < 0 {
+//		return nil, 0, errors.New("value larger than 64 bits")
+//	}
+//	return nil, 0, errors.New("insufficient bytes to decode value")
+//}
+//
+//// EncodeUvarint appends the encoded value to slice b and returns the appended slice.
+//// Note that the encoded result is not memcomparable.
+//func EncodeUvarint(b []byte, v uint64) []byte {
+//	var data [binary.MaxVarintLen64]byte
+//	n := binary.PutUvarint(data[:], v)
+//	return append(b, data[:n]...)
+//}
+//
+//// DecodeUvarint decodes value encoded by EncodeUvarint before.
+//// It returns the leftover un-decoded slice, decoded value if no error.
+//func DecodeUvarint(b []byte) ([]byte, uint64, error) {
+//	v, n := binary.Uvarint(b)
+//	if n > 0 {
+//		return b[n:], v, nil
+//	}
+//	if n < 0 {
+//		return nil, 0, errors.New("value larger than 64 bits")
+//	}
+//	return nil, 0, errors.New("insufficient bytes to decode value")
+//}
 
 const (
 	negativeTagEnd   = 8        // Negative tag is (negativeTagEnd - length).
@@ -255,10 +255,10 @@ func DecodeComparableVarint(b []byte) ([]byte, int64, error) {
 		return nil, 0, errors.Trace(errDecodeInsufficient)
 	}
 	first := b[0]
+	b = b[1:]
 	if first >= negativeTagEnd && first <= positiveTagStart {
 		return b, int64(first) - negativeTagEnd, nil
 	}
-	b = b[1:]
 	var length int
 	var v uint64
 	if first < negativeTagEnd {
@@ -279,4 +279,14 @@ func DecodeComparableVarint(b []byte) ([]byte, int64, error) {
 		return nil, 0, errors.Trace(errDecodeInvalid)
 	}
 	return b[length:], int64(v), nil
+}
+
+// ComparableVarintLen calculate the length of the compariable varint from the first byte.
+func ComparableVarintLen(first byte) int {
+	if first < negativeTagEnd {
+		return negativeTagEnd - int(first) + 1
+	} else if first > positiveTagStart {
+		return int(first) - positiveTagStart + 1
+	}
+	return 1
 }

@@ -140,13 +140,13 @@ func DecodeBytesDesc(b []byte) ([]byte, []byte, error) {
 // result is not memcomparable.
 func EncodeCompactBytes(b []byte, data []byte) []byte {
 	b = reallocBytes(b, binary.MaxVarintLen64+len(data))
-	b = EncodeVarint(b, int64(len(data)))
+	b = EncodeComparableVarint(b, int64(len(data)))
 	return append(b, data...)
 }
 
 // DecodeCompactBytes decodes bytes which is encoded by EncodeCompactBytes before.
 func DecodeCompactBytes(b []byte) ([]byte, []byte, error) {
-	b, n, err := DecodeVarint(b)
+	b, n, err := DecodeComparableVarint(b)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
 	}

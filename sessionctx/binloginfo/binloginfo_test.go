@@ -135,7 +135,7 @@ func (s *testBinlogSuite) TestBinlog(c *C) {
 		{types.NewIntDatum(1), types.NewStringDatum("abc")},
 		{types.NewIntDatum(2), types.NewStringDatum("cde")},
 	}
-	gotRows := mutationRowsToRows(c, prewriteVal.Mutations[0].InsertedRows, 0, 2)
+	gotRows := mutationRowsToRows(c, true, prewriteVal.Mutations[0].InsertedRows, 0, 2)
 	c.Assert(gotRows, DeepEquals, expected)
 
 	tk.MustExec("update local_binlog set name = 'xyz' where id = 2")
@@ -143,7 +143,7 @@ func (s *testBinlogSuite) TestBinlog(c *C) {
 	expected = [][]types.Datum{
 		{types.NewIntDatum(2), types.NewStringDatum("xyz")},
 	}
-	gotRows = mutationRowsToRows(c, prewriteVal.Mutations[0].UpdatedRows, 2, 4)
+	gotRows = mutationRowsToRows(c, true, prewriteVal.Mutations[0].UpdatedRows, 2, 4)
 	c.Assert(gotRows, DeepEquals, expected)
 
 	tk.MustExec("delete from local_binlog where id = 1")
@@ -164,7 +164,7 @@ func (s *testBinlogSuite) TestBinlog(c *C) {
 	tk.MustExec("insert local_binlog3 values (1, 2), (1, 3), (2, 3)")
 	tk.MustExec("update local_binlog3 set c1 = 3 where c1 = 2")
 	prewriteVal = getLatestBinlogPrewriteValue(c, pump)
-	gotRows = mutationRowsToRows(c, prewriteVal.Mutations[0].UpdatedRows, 5, 7)
+	gotRows = mutationRowsToRows(c, false, prewriteVal.Mutations[0].UpdatedRows, 5, 7)
 	expected = [][]types.Datum{
 		{types.NewIntDatum(3), types.NewIntDatum(3)},
 	}
@@ -173,7 +173,7 @@ func (s *testBinlogSuite) TestBinlog(c *C) {
 	tk.MustExec("delete from local_binlog3 where c1 = 3 and c2 = 3")
 	prewriteVal = getLatestBinlogPrewriteValue(c, pump)
 	c.Assert(prewriteVal.Mutations[0].Sequence[0], Equals, binlog.MutationType_DeleteRow)
-	gotRows = mutationRowsToRows(c, prewriteVal.Mutations[0].DeletedRows, 1, 3)
+	gotRows = mutationRowsToRows(c, false, prewriteVal.Mutations[0].DeletedRows, 1, 3)
 	expected = [][]types.Datum{
 		{types.NewIntDatum(3), types.NewIntDatum(3)},
 	}
@@ -283,11 +283,10 @@ func checkBinlogCount(c *C, pump *mockBinlogPump) {
 	c.Assert(match, IsTrue)
 }
 
-func mutationRowsToRows(c *C, mutationRows [][]byte, firstColumn, secondColumn int) [][]types.Datum {
+func mutationRowsToRows(c *C, hasHandle bool, mutationRows [][]byte, firstColumn, secondColumn int) [][]types.Datum {
 	var rows [][]types.Datum
 	for _, mutationRow := range mutationRows {
-		datums, err := codec.Decode(mutationRow, 5)
-		c.Assert(err, IsNil)
+		datums := decodeRow(c, hasHandle, mutationRow)
 		for i := range datums {
 			if i != firstColumn && i != secondColumn {
 				// Column ID or handle
@@ -301,4 +300,33 @@ func mutationRowsToRows(c *C, mutationRows [][]byte, firstColumn, secondColumn i
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+func decodeRow(c *C, hasHandle bool, row []byte) []types.Datum {
+	var (
+		datums []types.Datum
+		id     int64
+		err    error
+		datum  types.Datum
+	)
+	if hasHandle {
+		row, datum, err = codec.DecodeOne(row)
+		c.Assert(err, IsNil)
+		datums = append(datums, datum)
+	}
+	for {
+		if len(row) == 0 {
+			break
+		}
+		row, id, err = codec.DecodeComparableVarint(row)
+		c.Assert(err, IsNil)
+		datums = append(datums, types.NewDatum(id))
+		if len(row) == 0 {
+			break
+		}
+		row, datum, err = codec.DecodeOne(row)
+		c.Assert(err, IsNil)
+		datums = append(datums, datum)
+	}
+	return datums
 }
