@@ -21,15 +21,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ngaut/log"
+	log "github.com/Sirupsen/logrus"
 	"github.com/pingcap/tidb"
-	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/store/tikv"
+	"github.com/pingcap/tidb/store/tikv/gcworker"
+	"github.com/pingcap/tidb/terror"
+	"github.com/pingcap/tidb/util/logutil"
+	goctx "golang.org/x/net/context"
 )
 
 var (
 	addr      = flag.String("addr", "127.0.0.1:2379", "pd address")
-	tableName = flag.String("table", "bench_db", "name of the table")
+	tableName = flag.String("table", "benchdb", "name of the table")
 	batchSize = flag.Int("batch", 100, "number of statements in a transaction, used for insert and update-random only")
 	blobSize  = flag.Int("blob", 1000, "size of the blob column in the row")
 	logLevel  = flag.String("L", "warn", "log level")
@@ -43,19 +46,20 @@ var (
 		"select:0_10000:10",
 		"gc",
 		"select:0_10000:10",
-	}, ","), "jobs to run")
+	}, "|"), "jobs to run")
 )
-
-var blobString string
 
 func main() {
 	flag.Parse()
 	flag.PrintDefaults()
-	log.SetLevelByString(*logLevel)
-	tidb.RegisterStore("tikv", tikv.Driver{})
-	blobString = strings.Repeat("0", *blobSize)
+	err := logutil.InitLogger(&logutil.LogConfig{
+		Level: *logLevel,
+	})
+	terror.MustNil(err)
+	err = tidb.RegisterStore("tikv", tikv.Driver{})
+	terror.MustNil(err)
 	ut := newBenchDB()
-	works := strings.Split(*runJobs, ",")
+	works := strings.Split(*runJobs, "|")
 	for _, v := range works {
 		work := strings.ToLower(strings.TrimSpace(v))
 		name, spec := ut.mustParseWork(work)
@@ -74,6 +78,8 @@ func main() {
 			ut.selectRows(spec)
 		case "gc":
 			ut.manualGC(nil)
+		case "query":
+			ut.query(spec)
 		default:
 			cLog("Unknown job ", v)
 			return
@@ -82,45 +88,37 @@ func main() {
 }
 
 type benchDB struct {
-	store    kv.Storage
-	session  tidb.Session
-	gcWorker *tikv.GCWorker
+	store   tikv.Storage
+	session tidb.Session
 }
 
 func newBenchDB() *benchDB {
 	// Create TiKV store and disable GC as we will trigger GC manually.
 	store, err := tidb.NewStore("tikv://" + *addr + "?disableGC=true")
-	if err != nil {
-		log.Fatal(err)
-	}
+	terror.MustNil(err)
+	_, err = tidb.BootstrapSession(store)
+	terror.MustNil(err)
 	session, err := tidb.CreateSession(store)
-	if err != nil {
-		log.Fatal(err)
-	}
-	_, err = session.Execute("use test")
-	if err != nil {
-		log.Fatal(err)
-	}
-	gcWoker, err := tikv.NewGCWorker(store)
-	if err != nil {
-		log.Fatal(err)
-	}
+	terror.MustNil(err)
+	_, err = session.Execute(goctx.Background(), "use test")
+	terror.MustNil(err)
+
 	return &benchDB{
-		store:    store,
-		session:  session,
-		gcWorker: gcWoker,
+		store:   store.(tikv.Storage),
+		session: session,
 	}
 }
 
 func (ut *benchDB) mustExec(sql string) {
-	rss, err := ut.session.Execute(sql)
+	rss, err := ut.session.Execute(goctx.Background(), sql)
 	if err != nil {
 		log.Fatal(err)
 	}
 	if len(rss) > 0 {
+		goCtx := goctx.Background()
 		rs := rss[0]
 		for {
-			row, err1 := rs.Next()
+			row, err1 := rs.Next(goCtx)
 			if err1 != nil {
 				log.Fatal(err1)
 			}
@@ -223,12 +221,14 @@ func (ut *benchDB) insertRows(spec string) {
 	id := start
 	ut.runCountTimes("insert", loopCount, func() {
 		ut.mustExec("begin")
+		buf := make([]byte, *blobSize/2)
 		for i := 0; i < *batchSize; i++ {
 			if id == end {
 				break
 			}
-			insetQuery := fmt.Sprintf("insert %s (id, name, data) values (%d, '%d', '%s')",
-				*tableName, id, id, blobString)
+			rand.Read(buf)
+			insetQuery := fmt.Sprintf("insert %s (id, name, data) values (%d, '%d', '%x')",
+				*tableName, id, id, buf)
 			ut.mustExec(insetQuery)
 			id++
 		}
@@ -273,7 +273,7 @@ func (ut *benchDB) selectRows(spec string) {
 	})
 }
 
-// manually trigger GC and send to done channel after finished.
+// manualGC manually triggers GC and sends to done channel after finished.
 func (ut *benchDB) manualGC(done chan bool) {
 	cLog("GC started")
 	start := time.Now()
@@ -281,7 +281,7 @@ func (ut *benchDB) manualGC(done chan bool) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	err = ut.gcWorker.DoGC(ver.Ver)
+	err = gcworker.RunGCJob(goctx.Background(), ut.store, ver.Ver, "benchDB")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -289,6 +289,16 @@ func (ut *benchDB) manualGC(done chan bool) {
 	if done != nil {
 		done <- true
 	}
+}
+
+func (ut *benchDB) query(spec string) {
+	strs := strings.Split(spec, ":")
+	sql := strs[0]
+	count, err := strconv.Atoi(strs[1])
+	terror.MustNil(err)
+	ut.runCountTimes("query", count, func() {
+		ut.mustExec(sql)
+	})
 }
 
 func cLogf(format string, args ...interface{}) {

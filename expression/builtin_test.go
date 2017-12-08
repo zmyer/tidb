@@ -16,11 +16,52 @@ package expression
 import (
 	"reflect"
 
+	"github.com/juju/errors"
 	. "github.com/pingcap/check"
+	"github.com/pingcap/tidb/ast"
+	"github.com/pingcap/tidb/context"
+	"github.com/pingcap/tidb/model"
+	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/charset"
 	"github.com/pingcap/tidb/util/testleak"
-	"github.com/pingcap/tidb/util/testutil"
-	"github.com/pingcap/tidb/util/types"
 )
+
+func evalBuiltinFunc(f builtinFunc, row types.Row) (d types.Datum, err error) {
+	var (
+		res    interface{}
+		isNull bool
+	)
+	switch f.getRetTp().EvalType() {
+	case types.ETInt:
+		var intRes int64
+		intRes, isNull, err = f.evalInt(row)
+		if mysql.HasUnsignedFlag(f.getRetTp().Flag) {
+			res = uint64(intRes)
+		} else {
+			res = intRes
+		}
+	case types.ETReal:
+		res, isNull, err = f.evalReal(row)
+	case types.ETDecimal:
+		res, isNull, err = f.evalDecimal(row)
+	case types.ETDatetime, types.ETTimestamp:
+		res, isNull, err = f.evalTime(row)
+	case types.ETDuration:
+		res, isNull, err = f.evalDuration(row)
+	case types.ETJson:
+		res, isNull, err = f.evalJSON(row)
+	case types.ETString:
+		res, isNull, err = f.evalString(row)
+	}
+
+	if isNull || err != nil {
+		d.SetValue(nil)
+		return d, errors.Trace(err)
+	}
+	d.SetValue(res)
+	return
+}
 
 // tblToDtbl is a util function for test.
 func tblToDtbl(i interface{}) []map[string][]types.Datum {
@@ -57,48 +98,19 @@ func makeDatums(i interface{}) []types.Datum {
 	return types.MakeDatums(i)
 }
 
-func (s *testEvaluatorSuite) TestCoalesce(c *C) {
-	defer testleak.AfterTest(c)()
-	args := types.MakeDatums(1, nil)
-	v, err := builtinCoalesce(args, s.ctx)
-	c.Assert(err, IsNil)
-	c.Assert(v, testutil.DatumEquals, types.NewDatum(1))
-
-	args = types.MakeDatums(nil, nil)
-	v, err = builtinCoalesce(args, s.ctx)
-	c.Assert(err, IsNil)
-	c.Assert(v, testutil.DatumEquals, types.NewDatum(nil))
-}
-
-func (s *testEvaluatorSuite) TestGreatestFunc(c *C) {
-	defer testleak.AfterTest(c)()
-
-	v, err := builtinGreatest(types.MakeDatums(2, 0), s.ctx)
-	c.Assert(err, IsNil)
-	c.Assert(v.GetInt64(), Equals, int64(2))
-
-	v, err = builtinGreatest(types.MakeDatums(34.0, 3.0, 5.0, 767.0), s.ctx)
-	c.Assert(err, IsNil)
-	c.Assert(v.GetFloat64(), Equals, float64(767.0))
-
-	v, err = builtinGreatest(types.MakeDatums("B", "A", "C"), s.ctx)
-	c.Assert(err, IsNil)
-	c.Assert(v.GetString(), Equals, "C")
-
-	// GREATEST() returns NULL if any argument is NULL.
-	v, err = builtinGreatest(types.MakeDatums(1, nil, 2), s.ctx)
-	c.Assert(err, IsNil)
-	c.Assert(v.IsNull(), IsTrue)
-}
-
 func (s *testEvaluatorSuite) TestIsNullFunc(c *C) {
 	defer testleak.AfterTest(c)()
 
-	v, err := builtinIsNull(types.MakeDatums(1), s.ctx)
+	fc := funcs[ast.IsNull]
+	f, err := fc.getFunction(s.ctx, s.datumsToConstants(types.MakeDatums(1)))
+	c.Assert(err, IsNil)
+	v, err := evalBuiltinFunc(f, nil)
 	c.Assert(err, IsNil)
 	c.Assert(v.GetInt64(), Equals, int64(0))
 
-	v, err = builtinIsNull(types.MakeDatums(nil), s.ctx)
+	f, err = fc.getFunction(s.ctx, s.datumsToConstants(types.MakeDatums(nil)))
+	c.Assert(err, IsNil)
+	v, err = evalBuiltinFunc(f, nil)
 	c.Assert(err, IsNil)
 	c.Assert(v.GetInt64(), Equals, int64(1))
 }
@@ -106,15 +118,44 @@ func (s *testEvaluatorSuite) TestIsNullFunc(c *C) {
 func (s *testEvaluatorSuite) TestLock(c *C) {
 	defer testleak.AfterTest(c)()
 
-	v, err := builtinLock(types.MakeDatums(1), s.ctx)
+	lock := funcs[ast.GetLock]
+	f, err := lock.getFunction(s.ctx, s.datumsToConstants(types.MakeDatums(nil, 1)))
+	c.Assert(err, IsNil)
+	v, err := evalBuiltinFunc(f, nil)
 	c.Assert(err, IsNil)
 	c.Assert(v.GetInt64(), Equals, int64(1))
 
-	v, err = builtinLock(types.MakeDatums(nil), s.ctx)
+	releaseLock := funcs[ast.ReleaseLock]
+	f, err = releaseLock.getFunction(s.ctx, s.datumsToConstants(types.MakeDatums(1)))
 	c.Assert(err, IsNil)
-	c.Assert(v.GetInt64(), Equals, int64(1))
-
-	v, err = builtinReleaseLock(types.MakeDatums(1), s.ctx)
+	v, err = evalBuiltinFunc(f, nil)
 	c.Assert(err, IsNil)
 	c.Assert(v.GetInt64(), Equals, int64(1))
 }
+
+// newFunctionForTest creates a new ScalarFunction using funcName and arguments,
+// it is different from expression.NewFunction which needs an additional retType argument.
+func newFunctionForTest(ctx context.Context, funcName string, args ...Expression) (Expression, error) {
+	fc, ok := funcs[funcName]
+	if !ok {
+		return nil, errFunctionNotExists.GenByArgs("FUNCTION", funcName)
+	}
+	funcArgs := make([]Expression, len(args))
+	copy(funcArgs, args)
+	f, err := fc.getFunction(ctx, funcArgs)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return &ScalarFunction{
+		FuncName: model.NewCIStr(funcName),
+		RetType:  f.getRetTp(),
+		Function: f,
+	}, nil
+}
+
+var (
+	// MySQL int8.
+	int8Con = &Constant{RetType: &types.FieldType{Tp: mysql.TypeLonglong, Charset: charset.CharsetBin, Collate: charset.CollationBin}}
+	// MySQL varchar.
+	varcharCon = &Constant{RetType: &types.FieldType{Tp: mysql.TypeVarchar, Charset: charset.CharsetUTF8, Collate: charset.CollationUTF8}}
+)

@@ -16,22 +16,22 @@ package binloginfo_test
 import (
 	"net"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/ngaut/log"
 	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb"
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/sessionctx"
-	"github.com/pingcap/tidb/sessionctx/binloginfo"
 	"github.com/pingcap/tidb/store/tikv"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/codec"
+	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/testkit"
-	"github.com/pingcap/tidb/util/types"
 	"github.com/pingcap/tipb/go-binlog"
 	goctx "golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -39,6 +39,10 @@ import (
 
 func TestT(t *testing.T) {
 	CustomVerboseFlag = true
+	logLevel := os.Getenv("log_level")
+	logutil.InitLogger(&logutil.LogConfig{
+		Level: logLevel,
+	})
 	TestingT(t)
 }
 
@@ -57,8 +61,8 @@ func (p *mockBinlogPump) WriteBinlog(ctx goctx.Context, req *binlog.WriteBinlogR
 }
 
 // PullBinlogs implements PumpServer interface.
-func (p *mockBinlogPump) PullBinlogs(ctx goctx.Context, req *binlog.PullBinlogReq) (*binlog.PullBinlogResp, error) {
-	return &binlog.PullBinlogResp{}, nil
+func (p *mockBinlogPump) PullBinlogs(req *binlog.PullBinlogReq, srv binlog.Pump_PullBinlogsServer) error {
+	return nil
 }
 
 var _ = Suite(&testBinlogSuite{})
@@ -73,14 +77,11 @@ type testBinlogSuite struct {
 }
 
 func (s *testBinlogSuite) SetUpSuite(c *C) {
-	logLevel := os.Getenv("log_level")
-	log.SetLevelByString(logLevel)
 	store, err := tikv.NewMockTikvStore()
 	c.Assert(err, IsNil)
 	s.store = store
 	tidb.SetSchemaLease(0)
-	s.unixFile = "/tmp/mock-binlog-pump"
-	os.Remove(s.unixFile)
+	s.unixFile = "/tmp/mock-binlog-pump" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	l, err := net.Listen("unix", s.unixFile)
 	c.Assert(err, IsNil)
 	s.serv = grpc.NewServer()
@@ -93,16 +94,20 @@ func (s *testBinlogSuite) SetUpSuite(c *C) {
 	clientCon, err := grpc.Dial(s.unixFile, opt, grpc.WithInsecure())
 	c.Assert(err, IsNil)
 	c.Assert(clientCon, NotNil)
-	binloginfo.PumpClient = binlog.NewPumpClient(clientCon)
 	s.tk = testkit.NewTestKit(c, s.store)
+	_, err = tidb.BootstrapSession(store)
+	c.Assert(err, IsNil)
 	s.tk.MustExec("use test")
-	domain := sessionctx.GetDomain(s.tk.Se.(context.Context))
+	domain := domain.GetDomain(s.tk.Se.(context.Context))
 	s.ddl = domain.DDL()
+
+	binlogClient := binlog.NewPumpClient(clientCon)
+	s.tk.Se.GetSessionVars().BinlogClient = binlogClient
+	s.ddl.WorkerVars().BinlogClient = binlogClient
 }
 
 func (s *testBinlogSuite) TearDownSuite(c *C) {
 	s.ddl.Stop()
-	binloginfo.PumpClient = nil
 	s.serv.Stop()
 	os.Remove(s.unixFile)
 	s.store.Close()
@@ -117,11 +122,13 @@ func (s *testBinlogSuite) TestBinlog(c *C) {
 	var matched bool // got matched pre DDL and commit DDL
 	for i := 0; i < 10; i++ {
 		preDDL, commitDDL := getLatestDDLBinlog(c, pump, ddlQuery)
-		if preDDL.DdlJobId == commitDDL.DdlJobId {
-			c.Assert(commitDDL.StartTs, Equals, preDDL.StartTs)
-			c.Assert(commitDDL.CommitTs, Greater, commitDDL.StartTs)
-			matched = true
-			break
+		if preDDL != nil && commitDDL != nil {
+			if preDDL.DdlJobId == commitDDL.DdlJobId {
+				c.Assert(commitDDL.StartTs, Equals, preDDL.StartTs)
+				c.Assert(commitDDL.CommitTs, Greater, commitDDL.StartTs)
+				matched = true
+				break
+			}
 		}
 		time.Sleep(time.Millisecond * 10)
 	}
@@ -140,24 +147,38 @@ func (s *testBinlogSuite) TestBinlog(c *C) {
 
 	tk.MustExec("update local_binlog set name = 'xyz' where id = 2")
 	prewriteVal = getLatestBinlogPrewriteValue(c, pump)
-	expected = [][]types.Datum{
+	oldRow := [][]types.Datum{
+		{types.NewIntDatum(2), types.NewStringDatum("cde")},
+	}
+	newRow := [][]types.Datum{
 		{types.NewIntDatum(2), types.NewStringDatum("xyz")},
 	}
-	gotRows = mutationRowsToRows(c, prewriteVal.Mutations[0].UpdatedRows, 2, 4)
-	c.Assert(gotRows, DeepEquals, expected)
+	gotRows = mutationRowsToRows(c, prewriteVal.Mutations[0].UpdatedRows, 1, 3)
+	c.Assert(gotRows, DeepEquals, oldRow)
+
+	gotRows = mutationRowsToRows(c, prewriteVal.Mutations[0].UpdatedRows, 5, 7)
+	c.Assert(gotRows, DeepEquals, newRow)
 
 	tk.MustExec("delete from local_binlog where id = 1")
 	prewriteVal = getLatestBinlogPrewriteValue(c, pump)
-	c.Assert(prewriteVal.Mutations[0].DeletedIds, DeepEquals, []int64{1})
+	gotRows = mutationRowsToRows(c, prewriteVal.Mutations[0].DeletedRows, 1, 3)
+	expected = [][]types.Datum{
+		{types.NewIntDatum(1), types.NewStringDatum("abc")},
+	}
+	c.Assert(gotRows, DeepEquals, expected)
 
 	// Test table primary key is not integer.
 	tk.MustExec("create table local_binlog2 (name varchar(64) primary key, age int)")
 	tk.MustExec("insert local_binlog2 values ('abc', 16), ('def', 18)")
 	tk.MustExec("delete from local_binlog2 where name = 'def'")
 	prewriteVal = getLatestBinlogPrewriteValue(c, pump)
-	c.Assert(prewriteVal.Mutations[0].Sequence[0], Equals, binlog.MutationType_DeletePK)
-	_, deletedPK, _ := codec.DecodeOne(prewriteVal.Mutations[0].DeletedPks[0])
-	c.Assert(deletedPK.GetString(), Equals, "def")
+	c.Assert(prewriteVal.Mutations[0].Sequence[0], Equals, binlog.MutationType_DeleteRow)
+
+	expected = [][]types.Datum{
+		{types.NewStringDatum("def"), types.NewIntDatum(18)},
+	}
+	gotRows = mutationRowsToRows(c, prewriteVal.Mutations[0].DeletedRows, 1, 3)
+	c.Assert(gotRows, DeepEquals, expected)
 
 	// Test Table don't have primary key.
 	tk.MustExec("create table local_binlog3 (c1 int, c2 int)")
@@ -189,7 +210,7 @@ func (s *testBinlogSuite) TestBinlog(c *C) {
 	tk.MustExec("commit")
 	prewriteVal = getLatestBinlogPrewriteValue(c, pump)
 	c.Assert(prewriteVal.Mutations[0].Sequence, DeepEquals, []binlog.MutationType{
-		binlog.MutationType_DeleteID,
+		binlog.MutationType_DeleteRow,
 		binlog.MutationType_Insert,
 		binlog.MutationType_Update,
 	})
@@ -289,10 +310,6 @@ func mutationRowsToRows(c *C, mutationRows [][]byte, firstColumn, secondColumn i
 		datums, err := codec.Decode(mutationRow, 5)
 		c.Assert(err, IsNil)
 		for i := range datums {
-			if i != firstColumn && i != secondColumn {
-				// Column ID or handle
-				c.Assert(datums[i].GetInt64(), Greater, int64(0))
-			}
 			if datums[i].Kind() == types.KindBytes {
 				datums[i].SetBytesAsString(datums[i].GetBytes())
 			}

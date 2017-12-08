@@ -22,19 +22,24 @@ import (
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/util"
+	"github.com/pingcap/tidb/util/kvcache"
+	goctx "golang.org/x/net/context"
 )
 
 var _ context.Context = (*Context)(nil)
 
 // Context represents mocked context.Context.
 type Context struct {
-	values map[fmt.Stringer]interface{}
-	// mock global variable
-	txn         kv.Transaction
-	Store       kv.Storage
+	values      map[fmt.Stringer]interface{}
+	txn         kv.Transaction // mock global variable
+	Store       kv.Storage     // mock global variable
 	sessionVars *variable.SessionVars
-	// Fix data race in ddl test.
-	mux sync.Mutex
+	mux         sync.Mutex // fix data race in ddl test.
+	ctx         goctx.Context
+	cancel      goctx.CancelFunc
+	sm          util.SessionManager
+	pcache      *kvcache.SimpleLRUCache
 }
 
 // SetValue implements context.Context SetValue interface.
@@ -90,13 +95,18 @@ func (c *Context) SetGlobalSysVar(ctx context.Context, name string, value string
 	return nil
 }
 
+// PreparedPlanCache implements the context.Context interface.
+func (c *Context) PreparedPlanCache() *kvcache.SimpleLRUCache {
+	return c.pcache
+}
+
 // NewTxn implements the context.Context interface.
 func (c *Context) NewTxn() error {
 	if c.Store == nil {
 		return errors.New("store is not set")
 	}
 	if c.txn != nil && c.txn.Valid() {
-		err := c.txn.Commit()
+		err := c.txn.Commit(c.ctx)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -109,10 +119,75 @@ func (c *Context) NewTxn() error {
 	return nil
 }
 
+// RefreshTxnCtx implements the context.Context interface.
+func (c *Context) RefreshTxnCtx(goCtx goctx.Context) error {
+	return errors.Trace(c.NewTxn())
+}
+
+// ActivePendingTxn implements the context.Context interface.
+func (c *Context) ActivePendingTxn() error {
+	if c.txn != nil {
+		return nil
+	}
+	if c.Store != nil {
+		txn, err := c.Store.Begin()
+		if err != nil {
+			return errors.Trace(err)
+		}
+		c.txn = txn
+	}
+	return nil
+}
+
+// InitTxnWithStartTS implements the context.Context interface with startTS.
+func (c *Context) InitTxnWithStartTS(startTS uint64) error {
+	if c.txn != nil {
+		return nil
+	}
+	if c.Store != nil {
+		txn, err := c.Store.BeginWithStartTS(startTS)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		c.txn = txn
+	}
+	return nil
+}
+
+// GetStore gets the store of session.
+func (c *Context) GetStore() kv.Storage {
+	return c.Store
+}
+
+// GetSessionManager implements the context.Context interface.
+func (c *Context) GetSessionManager() util.SessionManager {
+	return c.sm
+}
+
+// SetSessionManager set the session manager.
+func (c *Context) SetSessionManager(sm util.SessionManager) {
+	c.sm = sm
+}
+
+// Cancel implements the Session interface.
+func (c *Context) Cancel() {
+	c.cancel()
+}
+
+// GoCtx returns standard context.Context that bind with current transaction.
+func (c *Context) GoCtx() goctx.Context {
+	return c.ctx
+}
+
 // NewContext creates a new mocked context.Context.
 func NewContext() *Context {
-	return &Context{
+	goCtx, cancel := goctx.WithCancel(goctx.Background())
+	ctx := &Context{
 		values:      make(map[fmt.Stringer]interface{}),
 		sessionVars: variable.NewSessionVars(),
+		ctx:         goCtx,
+		cancel:      cancel,
 	}
+	ctx.sessionVars.MaxChunkSize = 2
+	return ctx
 }

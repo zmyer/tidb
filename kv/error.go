@@ -24,8 +24,8 @@ import (
 const (
 	codeClosed                     terror.ErrCode = 1
 	codeNotExist                                  = 2
-	codeCondithinNotMatch                         = 3
-	codeLockConfilict                             = 4
+	codeConditionNotMatch                         = 3
+	codeLockConflict                              = 4
 	codeLazyConditionPairsNotMatch                = 5
 	codeRetryable                                 = 6
 	codeCantSetNilValue                           = 7
@@ -33,6 +33,7 @@ const (
 	codeNotCommitted                              = 9
 	codeNotImplemented                            = 10
 	codeTxnTooLarge                               = 11
+	codeEntryTooLarge                             = 12
 
 	codeKeyExists = 1062
 )
@@ -43,9 +44,9 @@ var (
 	// ErrNotExist is used when try to get an entry with an unexist key from KV store.
 	ErrNotExist = terror.ClassKV.New(codeNotExist, "Error: key not exist")
 	// ErrConditionNotMatch is used when condition is not met.
-	ErrConditionNotMatch = terror.ClassKV.New(codeCondithinNotMatch, "Error: Condition not match")
+	ErrConditionNotMatch = terror.ClassKV.New(codeConditionNotMatch, "Error: Condition not match")
 	// ErrLockConflict is used when try to lock an already locked key.
-	ErrLockConflict = terror.ClassKV.New(codeLockConfilict, "Error: Lock conflict")
+	ErrLockConflict = terror.ClassKV.New(codeLockConflict, "Error: Lock conflict")
 	// ErrLazyConditionPairsNotMatch is used when value in store differs from expect pairs.
 	ErrLazyConditionPairsNotMatch = terror.ClassKV.New(codeLazyConditionPairsNotMatch, "Error: Lazy condition pairs not match")
 	// ErrRetryable is used when KV store occurs RPC error or some other
@@ -57,6 +58,8 @@ var (
 	ErrInvalidTxn = terror.ClassKV.New(codeInvalidTxn, "invalid transaction")
 	// ErrTxnTooLarge is the error when transaction is too large, lock time reached the maximum value.
 	ErrTxnTooLarge = terror.ClassKV.New(codeTxnTooLarge, "transaction is too large")
+	// ErrEntryTooLarge is the error when a key value entry is too large.
+	ErrEntryTooLarge = terror.ClassKV.New(codeEntryTooLarge, "entry is too large")
 
 	// ErrNotCommitted is the error returned by CommitVersion when this
 	// transaction is not committed.
@@ -70,7 +73,9 @@ var (
 
 func init() {
 	kvMySQLErrCodes := map[terror.ErrCode]uint16{
-		codeKeyExists: mysql.ErrDupEntry,
+		codeKeyExists:     mysql.ErrDupEntry,
+		codeEntryTooLarge: mysql.ErrTooBigRowsize,
+		codeTxnTooLarge:   mysql.ErrTxnTooLarge,
 	}
 	terror.ErrClassToMySQLCodes[terror.ClassKV] = kvMySQLErrCodes
 }
@@ -81,9 +86,9 @@ func IsRetryableError(err error) bool {
 		return false
 	}
 
-	if terror.ErrorEqual(err, ErrRetryable) ||
-		terror.ErrorEqual(err, ErrLockConflict) ||
-		terror.ErrorEqual(err, ErrConditionNotMatch) ||
+	if ErrRetryable.Equal(err) ||
+		ErrLockConflict.Equal(err) ||
+		ErrConditionNotMatch.Equal(err) ||
 		// TiKV exception message will tell you if you should retry or not
 		strings.Contains(err.Error(), "try again later") {
 		return true
@@ -94,7 +99,7 @@ func IsRetryableError(err error) bool {
 
 // IsErrNotFound checks if err is a kind of NotFound error.
 func IsErrNotFound(err error) bool {
-	if terror.ErrorEqual(err, ErrNotExist) {
+	if ErrNotExist.Equal(err) {
 		return true
 	}
 

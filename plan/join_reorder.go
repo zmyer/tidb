@@ -16,19 +16,25 @@ package plan
 import (
 	"sort"
 
-	"github.com/ngaut/log"
+	log "github.com/Sirupsen/logrus"
 	"github.com/pingcap/tidb/ast"
+	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/expression"
 )
 
 // tryToGetJoinGroup tries to fetch a whole join group, which all joins is cartesian join.
-func tryToGetJoinGroup(j *Join) ([]LogicalPlan, bool) {
-	if j.reordered || !j.cartesianJoin {
+func tryToGetJoinGroup(j *LogicalJoin) ([]LogicalPlan, bool) {
+	// Ignore reorder if:
+	// 1. already reordered
+	// 2. not inner join
+	// 3. forced merge join
+	// 4. forced index nested loop join
+	if j.reordered || !j.cartesianJoin || j.preferMergeJoin || j.preferINLJ > 0 {
 		return nil, false
 	}
-	lChild := j.GetChildByIndex(0).(LogicalPlan)
-	rChild := j.GetChildByIndex(1).(LogicalPlan)
-	if nj, ok := lChild.(*Join); ok {
+	lChild := j.children[0].(LogicalPlan)
+	rChild := j.children[1].(LogicalPlan)
+	if nj, ok := lChild.(*LogicalJoin); ok {
 		plans, valid := tryToGetJoinGroup(nj)
 		return append(plans, rChild), valid
 	}
@@ -37,12 +43,11 @@ func tryToGetJoinGroup(j *Join) ([]LogicalPlan, bool) {
 
 func findColumnIndexByGroup(groups []LogicalPlan, col *expression.Column) int {
 	for i, plan := range groups {
-		idx := plan.GetSchema().GetColumnIndex(col)
-		if idx != -1 {
+		if plan.Schema().Contains(col) {
 			return i
 		}
 	}
-	log.Errorf("Unknown columns %s, from id %s, position %d", col, col.FromID, col.Position)
+	log.Errorf("Unknown columns %s, from id %v, position %d", col, col.FromID, col.Position)
 	return -1
 }
 
@@ -52,7 +57,7 @@ type joinReOrderSolver struct {
 	visited    []bool
 	resultJoin LogicalPlan
 	groupRank  []*rankInfo
-	allocator  *idAllocator
+	ctx        context.Context
 }
 
 type edgeList []*rankInfo
@@ -179,18 +184,13 @@ func (e *joinReOrderSolver) makeBushyJoin(cartesianJoinGroup []LogicalPlan) {
 	e.resultJoin = cartesianJoinGroup[0]
 }
 
-func (e *joinReOrderSolver) newJoin(lChild, rChild LogicalPlan) *Join {
-	join := &Join{
-		JoinType:        InnerJoin,
-		reordered:       true,
-		baseLogicalPlan: newBaseLogicalPlan(Jn, e.allocator),
-	}
-	join.self = join
-	join.initIDAndContext(lChild.context())
-	join.SetChildren(lChild, rChild)
-	join.SetSchema(expression.MergeSchema(lChild.GetSchema(), rChild.GetSchema()))
-	lChild.SetParents(join)
-	rChild.SetParents(join)
+func (e *joinReOrderSolver) newJoin(lChild, rChild LogicalPlan) *LogicalJoin {
+	join := LogicalJoin{
+		JoinType:  InnerJoin,
+		reordered: true,
+	}.init(e.ctx)
+	join.SetSchema(expression.MergeSchema(lChild.Schema(), rChild.Schema()))
+	setParentAndChildren(join, lChild, rChild)
 	return join
 }
 

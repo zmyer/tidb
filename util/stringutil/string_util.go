@@ -14,6 +14,7 @@
 package stringutil
 
 import (
+	"bytes"
 	"strings"
 	"unicode/utf8"
 
@@ -22,15 +23,6 @@ import (
 
 // ErrSyntax indicates that a value does not have the right syntax for the target type.
 var ErrSyntax = errors.New("invalid syntax")
-
-// Reverse returns its argument string reversed rune-wise left to right.
-func Reverse(s string) string {
-	r := []rune(s)
-	for i, j := 0, len(r)-1; i < len(r)/2; i, j = i+1, j-1 {
-		r[i], r[j] = r[j], r[i]
-	}
-	return string(r)
-}
 
 // UnquoteChar decodes the first character or byte in the escaped string
 // or character literal represented by the string s.
@@ -130,4 +122,130 @@ func Unquote(s string) (t string, err error) {
 		buf = append(buf, mb...)
 	}
 	return string(buf), nil
+}
+
+const (
+	patMatch = iota + 1
+	patOne
+	patAny
+)
+
+// CompilePattern handles escapes and wild cards convert pattern characters and
+// pattern types.
+func CompilePattern(pattern string, escape byte) (patChars, patTypes []byte) {
+	var lastAny bool
+	patChars = make([]byte, len(pattern))
+	patTypes = make([]byte, len(pattern))
+	patLen := 0
+	for i := 0; i < len(pattern); i++ {
+		var tp byte
+		var c = pattern[i]
+		switch c {
+		case escape:
+			lastAny = false
+			tp = patMatch
+			if i < len(pattern)-1 {
+				i++
+				c = pattern[i]
+				if c == escape || c == '_' || c == '%' {
+					// Valid escape.
+				} else {
+					// Invalid escape, fall back to escape byte.
+					// mysql will treat escape character as the origin value even
+					// the escape sequence is invalid in Go or C.
+					// e.g., \m is invalid in Go, but in MySQL we will get "m" for select '\m'.
+					// Following case is correct just for escape \, not for others like +.
+					// TODO: Add more checks for other escapes.
+					i--
+					c = escape
+				}
+			}
+		case '_':
+			if lastAny {
+				patChars[patLen-1], patTypes[patLen-1] = c, patOne
+				patChars[patLen], patTypes[patLen] = '%', patAny
+				patLen++
+				continue
+			}
+			tp = patOne
+		case '%':
+			if lastAny {
+				continue
+			}
+			lastAny = true
+			tp = patAny
+		default:
+			lastAny = false
+			tp = patMatch
+		}
+		patChars[patLen] = c
+		patTypes[patLen] = tp
+		patLen++
+	}
+	patChars = patChars[:patLen]
+	patTypes = patTypes[:patLen]
+	return
+}
+
+const caseDiff = 'a' - 'A'
+
+// NOTE: Currently tikv's like function is case sensitive, so we keep its behavior here.
+func matchByteCI(a, b byte) bool {
+	return a == b
+	// We may reuse below code block when like function go back to case insensitive.
+	/*
+		if a == b {
+			return true
+		}
+		if a >= 'a' && a <= 'z' && a-caseDiff == b {
+			return true
+		}
+		return a >= 'A' && a <= 'Z' && a+caseDiff == b
+	*/
+}
+
+// DoMatch matches the string with patChars and patTypes.
+func DoMatch(str string, patChars, patTypes []byte) bool {
+	var sIdx int
+	for i := 0; i < len(patChars); i++ {
+		switch patTypes[i] {
+		case patMatch:
+			if sIdx >= len(str) || !matchByteCI(str[sIdx], patChars[i]) {
+				return false
+			}
+			sIdx++
+		case patOne:
+			sIdx++
+			if sIdx > len(str) {
+				return false
+			}
+		case patAny:
+			i++
+			if i == len(patChars) {
+				return true
+			}
+			for sIdx < len(str) {
+				if matchByteCI(patChars[i], str[sIdx]) && DoMatch(str[sIdx:], patChars[i:], patTypes[i:]) {
+					return true
+				}
+				sIdx++
+			}
+			return false
+		}
+	}
+	return sIdx == len(str)
+}
+
+// RemoveBlanks removes all blanks, returns a new string.
+func RemoveBlanks(s string) string {
+	var buf = new(bytes.Buffer)
+	var cbuf [6]byte
+	for _, c := range s {
+		if c == rune(' ') || c == rune('\t') || c == rune('\r') || c == rune('\n') {
+			continue
+		}
+		len := utf8.EncodeRune(cbuf[0:], c)
+		buf.Write(cbuf[0:len])
+	}
+	return buf.String()
 }

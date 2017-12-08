@@ -35,6 +35,8 @@ type UnionStore interface {
 	DelOption(opt Option)
 	// GetOption gets an option.
 	GetOption(opt Option) interface{}
+	// GetMemBuffer return the MemBuffer binding to this UnionStore.
+	GetMemBuffer() MemBuffer
 }
 
 // Option is used for customizing kv store's behaviors during a transaction.
@@ -54,7 +56,7 @@ type conditionPair struct {
 	err   error
 }
 
-// UnionStore is an in-memory Store which contains a buffer for write and a
+// unionStore is an in-memory Store which contains a buffer for write and a
 // snapshot for read.
 type unionStore struct {
 	*BufferStore
@@ -101,7 +103,7 @@ type lazyMemBuffer struct {
 
 func (lmb *lazyMemBuffer) Get(k Key) ([]byte, error) {
 	if lmb.mb == nil {
-		return nil, ErrNotExist
+		return nil, errors.Trace(ErrNotExist)
 	}
 
 	return lmb.mb.Get(k)
@@ -135,6 +137,20 @@ func (lmb *lazyMemBuffer) SeekReverse(k Key) (Iterator, error) {
 		return invalidIterator{}, nil
 	}
 	return lmb.mb.SeekReverse(k)
+}
+
+func (lmb *lazyMemBuffer) Size() int {
+	if lmb.mb == nil {
+		return 0
+	}
+	return lmb.mb.Size()
+}
+
+func (lmb *lazyMemBuffer) Len() int {
+	if lmb.mb == nil {
+		return 0
+	}
+	return lmb.mb.Len()
 }
 
 // Get implements the Retriever interface.
@@ -214,6 +230,10 @@ func (us *unionStore) DelOption(opt Option) {
 // GetOption implements the UnionStore GetOption interface.
 func (us *unionStore) GetOption(opt Option) interface{} {
 	return us.opts[opt]
+}
+
+func (us *unionStore) GetMemBuffer() MemBuffer {
+	return us.BufferStore.MemBuffer
 }
 
 type options map[Option]interface{}

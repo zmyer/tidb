@@ -14,162 +14,47 @@
 package executor
 
 import (
+	log "github.com/Sirupsen/logrus"
 	"github.com/juju/errors"
-	"github.com/ngaut/log"
+	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/tidb/ast"
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/plan"
+	goctx "golang.org/x/net/context"
 )
 
-// Compiler compiles an ast.StmtNode to a stmt.Statement.
+// Compiler compiles an ast.StmtNode to a physical plan.
 type Compiler struct {
+	Ctx context.Context
 }
 
-const (
-	// IGNORE is a special label to identify the situations we want to ignore.
-	IGNORE = "Ignore"
-	// SimpleSelect represents SELECT statements like "select a from t" or "select 2".
-	SimpleSelect = "Simple-Select"
-	// ComplexSelect represents the other SELECT statements besides SIMPLE_SELECT.
-	ComplexSelect = "Complex-Select"
-	// AlterTable represents alter table statements.
-	AlterTable = "AlterTable"
-	// AnalyzeTable represents analyze table statements.
-	AnalyzeTable = "AnalyzeTable"
-	// Begin represents begin statements.
-	Begin = "Begin"
-	// Commit represents commit statements.
-	Commit = "Commit"
-	// CreateDatabase represents create database statements.
-	CreateDatabase = "CreateDatabase"
-	// CreateIndex represents create index statements.
-	CreateIndex = "CreateIndex"
-	// CreateTable represents create table statements.
-	CreateTable = "CreateTable"
-	// CreateUser represents create user statements.
-	CreateUser = "CreateUser"
-	// Delete represents delete statements.
-	Delete = "Delete"
-	// DropDatabase represents drop database statements.
-	DropDatabase = "DropDatabase"
-	// DropIndex represents drop index statements.
-	DropIndex = "DropIndex"
-	// DropTable represents drop table statements.
-	DropTable = "DropTable"
-	// Explain represents explain statements.
-	Explain = "Explain"
-	// Replace represents replace statements.
-	Replace = "Replace"
-	// Insert represents insert statements.
-	Insert = "Insert"
-	// LoadDataStmt represents load data statements.
-	LoadDataStmt = "LoadData"
-	// RollBack represents roll back statements.
-	RollBack = "RollBack"
-	// Set represents set statements.
-	Set = "Set"
-	// Show represents show statements.
-	Show = "Show"
-	// TruncateTable represents truncate table statements.
-	TruncateTable = "TruncateTable"
-	// Update represents update statements.
-	Update = "Update"
-)
-
-func statementLabel(node ast.StmtNode) string {
-	switch x := node.(type) {
-	case *ast.AlterTableStmt:
-		return AlterTable
-	case *ast.AnalyzeTableStmt:
-		return AnalyzeTable
-	case *ast.BeginStmt:
-		return Begin
-	case *ast.CommitStmt:
-		return Commit
-	case *ast.CreateDatabaseStmt:
-		return CreateDatabase
-	case *ast.CreateIndexStmt:
-		return CreateIndex
-	case *ast.CreateTableStmt:
-		return CreateTable
-	case *ast.CreateUserStmt:
-		return CreateUser
-	case *ast.DeleteStmt:
-		return Delete
-	case *ast.DropDatabaseStmt:
-		return DropDatabase
-	case *ast.DropIndexStmt:
-		return DropIndex
-	case *ast.DropTableStmt:
-		return DropTable
-	case *ast.ExplainStmt:
-		return Explain
-	case *ast.InsertStmt:
-		if x.IsReplace {
-			return Replace
-		}
-		return Insert
-	case *ast.LoadDataStmt:
-		return LoadDataStmt
-	case *ast.RollbackStmt:
-		return RollBack
-	case *ast.SelectStmt:
-		return getSelectStmtLabel(x)
-	case *ast.SetStmt, *ast.SetPwdStmt:
-		return Set
-	case *ast.ShowStmt:
-		return Show
-	case *ast.TruncateTableStmt:
-		return TruncateTable
-	case *ast.UpdateStmt:
-		return Update
-	case *ast.DeallocateStmt, *ast.ExecuteStmt, *ast.PrepareStmt, *ast.UseStmt:
-		return IGNORE
+// Compile compiles an ast.StmtNode to a physical plan.
+func (c *Compiler) Compile(goCtx goctx.Context, stmtNode ast.StmtNode) (*ExecStmt, error) {
+	if span := opentracing.SpanFromContext(goCtx); span != nil {
+		span1 := opentracing.StartSpan("executor.Compile", opentracing.ChildOf(span.Context()))
+		defer span1.Finish()
 	}
-	return "other"
-}
 
-func getSelectStmtLabel(x *ast.SelectStmt) string {
-	if x.From == nil {
-		return SimpleSelect
-	}
-	tableRefs := x.From.TableRefs
-	if tableRefs.Right == nil {
-		switch ref := tableRefs.Left.(type) {
-		case *ast.TableSource:
-			switch ref.Source.(type) {
-			case *ast.TableName:
-				return SimpleSelect
-			}
-		}
-	}
-	return ComplexSelect
-}
-
-// Compile compiles an ast.StmtNode to an ast.Statement.
-// After preprocessed and validated, it will be optimized to a plan,
-// then wrappped to an adapter *statement as stmt.Statement.
-func (c *Compiler) Compile(ctx context.Context, node ast.StmtNode) (ast.Statement, error) {
-	stmtCount(node)
-	is := GetInfoSchema(ctx)
-	if err := plan.Preprocess(node, is, ctx); err != nil {
+	infoSchema := GetInfoSchema(c.Ctx)
+	if err := plan.Preprocess(c.Ctx, stmtNode, infoSchema, false); err != nil {
 		return nil, errors.Trace(err)
 	}
-	// Validate should be after NameResolve.
-	if err := plan.Validate(node, false); err != nil {
-		return nil, errors.Trace(err)
-	}
-	p, err := plan.Optimize(ctx, node, is)
+
+	finalPlan, err := plan.Optimize(c.Ctx, stmtNode, infoSchema)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	sa := &statement{
-		is:   is,
-		plan: p,
-		text: node.Text(),
-	}
-	return sa, nil
+
+	return &ExecStmt{
+		InfoSchema: infoSchema,
+		Plan:       finalPlan,
+		Expensive:  stmtCount(stmtNode, finalPlan, c.Ctx.GetSessionVars().InRestrictedSQL),
+		Cacheable:  plan.Cacheable(stmtNode),
+		Text:       stmtNode.Text(),
+		StmtNode:   stmtNode,
+		Ctx:        c.Ctx,
+	}, nil
 }
 
 // GetInfoSchema gets TxnCtx InfoSchema if snapshot schema is not set,

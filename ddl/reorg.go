@@ -14,18 +14,33 @@
 package ddl
 
 import (
+	"sync/atomic"
 	"time"
 
+	log "github.com/Sirupsen/logrus"
 	"github.com/juju/errors"
-	"github.com/ngaut/log"
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/model"
 	"github.com/pingcap/tidb/mysql"
-	"github.com/pingcap/tidb/terror"
 	"github.com/pingcap/tidb/util/mock"
 )
+
+// reorgCtx is for reorganization.
+type reorgCtx struct {
+	// doneCh is used to notify.
+	// If the reorganization job is done, we will use this channel to notify outer.
+	// TODO: Now we use goroutine to simulate reorganization jobs, later we may
+	// use a persistent job list.
+	doneCh chan error
+	// rowCount is used to simulate a job's row count.
+	rowCount int64
+	// notifyCancelReorgJob is used to notify the backfilling goroutine if the DDL job is cancelled.
+	notifyCancelReorgJob chan struct{}
+	// doneHandle is used to simulate the handle that has been processed.
+	doneHandle int64
+}
 
 // newContext gets a context. It is only used for adding column in reorganization state.
 func (d *ddl) newContext() context.Context {
@@ -37,14 +52,30 @@ func (d *ddl) newContext() context.Context {
 
 const waitReorgTimeout = 10 * time.Second
 
-func (d *ddl) runReorgJob(f func() error) error {
-	if d.reorgDoneCh == nil {
+func (rc *reorgCtx) setRowCountAndHandle(count, doneHandle int64) {
+	atomic.StoreInt64(&rc.rowCount, count)
+	atomic.StoreInt64(&rc.doneHandle, doneHandle)
+}
+
+func (rc *reorgCtx) getRowCountAndHandle() (int64, int64) {
+	row := atomic.LoadInt64(&rc.rowCount)
+	handle := atomic.LoadInt64(&rc.doneHandle)
+	return row, handle
+}
+
+func (rc *reorgCtx) clean() {
+	rc.setRowCountAndHandle(0, 0)
+	rc.doneCh = nil
+}
+
+func (d *ddl) runReorgJob(t *meta.Meta, job *model.Job, f func() error) error {
+	if d.reorgCtx.doneCh == nil {
 		// start a reorganization job
 		d.wait.Add(1)
-		d.reorgDoneCh = make(chan error, 1)
+		d.reorgCtx.doneCh = make(chan error, 1)
 		go func() {
 			defer d.wait.Done()
-			d.reorgDoneCh <- f()
+			d.reorgCtx.doneCh <- f()
 		}()
 	}
 
@@ -55,144 +86,54 @@ func (d *ddl) runReorgJob(f func() error) error {
 	// we will wait 2 * lease outer and try checking again,
 	// so we use a very little timeout here.
 	if d.lease > 0 {
-		waitTimeout = 1 * time.Millisecond
+		waitTimeout = 50 * time.Millisecond
 	}
 
 	// wait reorganization job done or timeout
 	select {
-	case err := <-d.reorgDoneCh:
-		log.Info("[ddl] run reorg job done")
-		d.reorgDoneCh = nil
+	case err := <-d.reorgCtx.doneCh:
+		rowCount, _ := d.reorgCtx.getRowCountAndHandle()
+		log.Infof("[ddl] run reorg job done, handled %d rows", rowCount)
+		// Update a job's RowCount.
+		job.SetRowCount(rowCount)
+		d.reorgCtx.clean()
 		return errors.Trace(err)
 	case <-d.quitCh:
 		log.Info("[ddl] run reorg job ddl quit")
-		// we return errWaitReorgTimeout here too, so that outer loop will break.
+		d.reorgCtx.setRowCountAndHandle(0, 0)
+		// We return errWaitReorgTimeout here too, so that outer loop will break.
 		return errWaitReorgTimeout
 	case <-time.After(waitTimeout):
-		log.Infof("[ddl] run reorg job wait timeout :%v", waitTimeout)
-		// if timeout, we will return, check the owner and retry to wait job done again.
+		rowCount, doneHandle := d.reorgCtx.getRowCountAndHandle()
+		// Update a job's RowCount.
+		job.SetRowCount(rowCount)
+		// Update a reorgInfo's handle.
+		err := t.UpdateDDLReorgHandle(job, doneHandle)
+		log.Infof("[ddl] run reorg job wait timeout %v, handled %d rows, current done handle %d, err %v", waitTimeout, rowCount, doneHandle, err)
+		// If timeout, we will return, check the owner and retry to wait job done again.
 		return errWaitReorgTimeout
 	}
 }
 
-func (d *ddl) isReorgRunnable(txn kv.Transaction, flag JobType) error {
+func (d *ddl) isReorgRunnable() error {
 	if d.isClosed() {
-		// worker is closed, can't run reorganization.
-		return errors.Trace(errInvalidWorker.Gen("worker is closed"))
+		// Worker is closed. So it can't do the reorganizational job.
+		return errInvalidWorker.Gen("worker is closed")
 	}
 
-	t := meta.NewMeta(txn)
-	owner, err := d.getJobOwner(t, flag)
-	if err != nil {
-		return errors.Trace(err)
+	select {
+	case <-d.reorgCtx.notifyCancelReorgJob:
+		// Job is cancelled. So it can't be done.
+		return errCancelledDDLJob
+	default:
 	}
-	if owner == nil || owner.OwnerID != d.uuid {
-		// if no owner, we will try later, so here just return error.
-		// or another server is owner, return error too.
-		log.Infof("[ddl] %s job, self id %s owner %s, txnTS:%d", flag, d.uuid, owner, txn.StartTS())
+
+	if !d.isOwner() {
+		// If it's not the owner, we will try later, so here just returns an error.
+		log.Infof("[ddl] the %s not the job owner", d.uuid)
 		return errors.Trace(errNotOwner)
 	}
-
 	return nil
-}
-
-// delKeysWithStartKey deletes keys with start key in a limited number. If limit < 0, deletes all keys.
-// It returns the number of rows deleted, next start key and the error.
-func (d *ddl) delKeysWithStartKey(prefix, startKey kv.Key, jobType JobType, job *model.Job, limit int) (int, kv.Key, error) {
-	limitedDel := limit >= 0
-
-	var count int
-	total := job.GetRowCount()
-	keys := make([]kv.Key, 0, defaultBatchCnt)
-	for {
-		if limitedDel && count >= limit {
-			break
-		}
-		batch := defaultBatchCnt
-		if limitedDel && count+batch > limit {
-			batch = limit - count
-		}
-		startTS := time.Now()
-		err := kv.RunInNewTxn(d.store, true, func(txn kv.Transaction) error {
-			if err1 := d.isReorgRunnable(txn, jobType); err1 != nil {
-				return errors.Trace(err1)
-			}
-
-			iter, err := txn.Seek(startKey)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			defer iter.Close()
-
-			for i := 0; i < batch; i++ {
-				if iter.Valid() && iter.Key().HasPrefix(prefix) {
-					keys = append(keys, iter.Key().Clone())
-					err = iter.Next()
-					if err != nil {
-						return errors.Trace(err)
-					}
-				} else {
-					break
-				}
-			}
-
-			for _, key := range keys {
-				err := txn.Delete(key)
-				// must skip ErrNotExist
-				// if key doesn't exist, skip this error.
-				if err != nil && !terror.ErrorEqual(err, kv.ErrNotExist) {
-					return errors.Trace(err)
-				}
-			}
-
-			count += len(keys)
-			total += int64(len(keys))
-			return nil
-		})
-		sub := time.Since(startTS).Seconds()
-		if err != nil {
-			log.Warnf("[ddl] deleted %d keys failed, take time %v, deleted %d keys in total", len(keys), sub, total)
-			return 0, startKey, errors.Trace(err)
-		}
-
-		job.SetRowCount(total)
-		batchHandleDataHistogram.WithLabelValues(batchDelData).Observe(sub)
-		log.Infof("[ddl] deleted %d keys take time %v, deleted %d keys in total", len(keys), sub, total)
-
-		if len(keys) > 0 {
-			startKey = keys[len(keys)-1]
-		}
-
-		if noMoreKeysToDelete := len(keys) < batch; noMoreKeysToDelete {
-			break
-		}
-
-		keys = keys[:0]
-	}
-
-	return count, startKey, nil
-}
-
-// addDBHistoryInfo adds schema version and schema information that are used for binlog.
-// dbInfo is added in the following operations: create database, drop database.
-func addDBHistoryInfo(job *model.Job, ver int64, dbInfo *model.DBInfo) {
-	// TODO: Remove it.
-	// This is for compatibility with previous version.
-	job.Args = []interface{}{ver, dbInfo}
-	if job.BinlogInfo != nil {
-		job.BinlogInfo.AddDBInfo(ver, dbInfo)
-	}
-}
-
-// addTableHistoryInfo adds schema version and table information that are used for binlog.
-// tblInfo is added except for the following operations: create database, drop database.
-func addTableHistoryInfo(job *model.Job, ver int64, tblInfo *model.TableInfo) {
-	// TODO: Remove it.
-	// This is for compatibility with previous version.
-	job.Args = []interface{}{ver, tblInfo}
-	if job.BinlogInfo != nil {
-		job.BinlogInfo.AddTableInfo(ver, tblInfo)
-	}
 }
 
 type reorgInfo struct {
@@ -227,11 +168,6 @@ func (d *ddl) getReorgInfo(t *meta.Meta, job *model.Job) (*reorgInfo, error) {
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-	}
-
-	if info.Handle > 0 {
-		// we have already handled this handle, so use next
-		info.Handle++
 	}
 
 	return info, errors.Trace(err)

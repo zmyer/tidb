@@ -14,37 +14,50 @@
 package ddl
 
 import (
-	"fmt"
 	"os"
 	"testing"
+	"time"
 
-	"github.com/ngaut/log"
+	"github.com/coreos/etcd/clientv3"
 	. "github.com/pingcap/check"
+	"github.com/pingcap/tidb/ast"
 	"github.com/pingcap/tidb/context"
+	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/model"
-	"github.com/pingcap/tidb/store/localstore"
-	"github.com/pingcap/tidb/store/localstore/goleveldb"
+	"github.com/pingcap/tidb/store/tikv"
+	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/mock"
+	goctx "golang.org/x/net/context"
 )
 
 func TestT(t *testing.T) {
 	CustomVerboseFlag = true
+	logLevel := os.Getenv("log_level")
+	logutil.InitLogger(&logutil.LogConfig{
+		Level:  logLevel,
+		Format: "highlight",
+	})
 	TestingT(t)
 }
 
 func testCreateStore(c *C, name string) kv.Storage {
-	driver := localstore.Driver{Driver: goleveldb.MemoryDriver{}}
-	store, err := driver.Open(fmt.Sprintf("memory://%s", name))
+	store, err := tikv.NewMockTikvStore()
 	c.Assert(err, IsNil)
 	return store
 }
 
-func testNewContext(c *C, d *ddl) context.Context {
+func testNewContext(d *ddl) context.Context {
 	ctx := mock.NewContext()
 	ctx.Store = d.store
 	return ctx
+}
+
+func testNewDDL(ctx goctx.Context, etcdCli *clientv3.Client, store kv.Storage,
+	infoHandle *infoschema.Handle, hook Callback, lease time.Duration) *ddl {
+	return newDDL(ctx, etcdCli, store, infoHandle, hook, lease, nil)
 }
 
 func getSchemaVer(c *C, ctx context.Context) int64 {
@@ -73,42 +86,62 @@ func checkEqualTable(c *C, t1, t2 *model.TableInfo) {
 	c.Assert(t1.AutoIncID, DeepEquals, t2.AutoIncID)
 }
 
+func checkHistoryJob(c *C, job *model.Job) {
+	c.Assert(job.State, Equals, model.JobStateSynced)
+}
+
 func checkHistoryJobArgs(c *C, ctx context.Context, id int64, args *historyJobArgs) {
 	c.Assert(ctx.NewTxn(), IsNil)
 	t := meta.NewMeta(ctx.Txn())
 	historyJob, err := t.GetHistoryDDLJob(id)
 	c.Assert(err, IsNil)
 
-	var v int64
-	var ids []int64
-	tbl := &model.TableInfo{}
 	if args.tbl != nil {
-		historyJob.DecodeArgs(&v, &tbl)
-		c.Assert(v, Equals, args.ver)
-		checkEqualTable(c, tbl, args.tbl)
+		c.Assert(historyJob.BinlogInfo.SchemaVersion, Equals, args.ver)
+		checkEqualTable(c, historyJob.BinlogInfo.TableInfo, args.tbl)
 		return
 	}
-	// only for create schema job
-	db := &model.DBInfo{}
+
+	// for handling schema job
+	c.Assert(historyJob.BinlogInfo.SchemaVersion, Equals, args.ver)
+	c.Assert(historyJob.BinlogInfo.DBInfo, DeepEquals, args.db)
+	// only for creating schema job
 	if args.db != nil && len(args.tblIDs) == 0 {
-		historyJob.DecodeArgs(&v, &db)
-		c.Assert(v, Equals, args.ver)
-		c.Assert(db, DeepEquals, args.db)
 		return
 	}
-	// only for drop schema job
-	historyJob.DecodeArgs(&v, &db, &ids)
-	c.Assert(v, Equals, args.ver)
-	c.Assert(db, DeepEquals, args.db)
-	for _, id := range ids {
-		c.Assert(args.tblIDs, HasKey, id)
-		delete(args.tblIDs, id)
-	}
-	c.Assert(len(args.tblIDs), Equals, 0)
 }
 
-func init() {
-	logLevel := os.Getenv("log_level")
-	log.SetLevelByString(logLevel)
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.Lshortfile)
+func testCreateIndex(c *C, ctx context.Context, d *ddl, dbInfo *model.DBInfo, tblInfo *model.TableInfo, unique bool, indexName string, colName string) *model.Job {
+	job := &model.Job{
+		SchemaID:   dbInfo.ID,
+		TableID:    tblInfo.ID,
+		Type:       model.ActionAddIndex,
+		BinlogInfo: &model.HistoryInfo{},
+		Args: []interface{}{unique, model.NewCIStr(indexName),
+			[]*ast.IndexColName{{
+				Column: &ast.ColumnName{Name: model.NewCIStr(colName)},
+				Length: types.UnspecifiedLength}}},
+	}
+
+	err := d.doDDLJob(ctx, job)
+	c.Assert(err, IsNil)
+	v := getSchemaVer(c, ctx)
+	checkHistoryJobArgs(c, ctx, job.ID, &historyJobArgs{ver: v, tbl: tblInfo})
+	return job
+}
+
+func testDropIndex(c *C, ctx context.Context, d *ddl, dbInfo *model.DBInfo, tblInfo *model.TableInfo, indexName string) *model.Job {
+	job := &model.Job{
+		SchemaID:   dbInfo.ID,
+		TableID:    tblInfo.ID,
+		Type:       model.ActionDropIndex,
+		BinlogInfo: &model.HistoryInfo{},
+		Args:       []interface{}{model.NewCIStr(indexName)},
+	}
+
+	err := d.doDDLJob(ctx, job)
+	c.Assert(err, IsNil)
+	v := getSchemaVer(c, ctx)
+	checkHistoryJobArgs(c, ctx, job.ID, &historyJobArgs{ver: v, tbl: tblInfo})
+	return job
 }

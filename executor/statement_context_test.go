@@ -14,11 +14,14 @@
 package executor_test
 
 import (
+	"fmt"
+	"unicode/utf8"
+
 	. "github.com/pingcap/check"
+	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/terror"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/testkit"
-	"github.com/pingcap/tidb/util/testleak"
-	"github.com/pingcap/tidb/util/types"
 )
 
 const (
@@ -27,10 +30,6 @@ const (
 )
 
 func (s *testSuite) TestStatementContext(c *C) {
-	defer func() {
-		s.cleanEnv(c)
-		testleak.AfterTest(c)
-	}()
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("create table sc (a int)")
@@ -38,7 +37,8 @@ func (s *testSuite) TestStatementContext(c *C) {
 
 	tk.MustExec(strictModeSQL)
 	tk.MustQuery("select * from sc where a > cast(1.1 as decimal)").Check(testkit.Rows("2"))
-	_, err := tk.Exec("update sc set a = 4 where a > cast(1.1 as decimal)")
+	_, err := tk.Exec(`select * from sc where a > cast(1.1 as decimal);
+		        update sc set a = 4 where a > cast(1.1 as decimal)`)
 	c.Check(terror.ErrorEqual(err, types.ErrTruncated), IsTrue)
 
 	tk.MustExec(nonStrictModeSQL)
@@ -64,4 +64,24 @@ func (s *testSuite) TestStatementContext(c *C) {
 	tk.MustExec("update sc set a = 4 where a > '1x'")
 	tk.MustExec("delete from sc where a < '1x'")
 	tk.MustQuery("select * from sc where a > '1x'").Check(testkit.Rows("4"))
+
+	// Test invalid UTF8
+	tk.MustExec("create table sc2 (a varchar(255))")
+	// Insert an invalid UTF8
+	tk.MustExec("insert sc2 values (unhex('4040ffff'))")
+	c.Assert(tk.Se.GetSessionVars().StmtCtx.WarningCount(), Greater, uint16(0))
+	tk.MustQuery("select * from sc2").Check(testkit.Rows("@@"))
+	tk.MustExec(strictModeSQL)
+	_, err = tk.Exec("insert sc2 values (unhex('4040ffff'))")
+	c.Assert(err, NotNil)
+	c.Assert(terror.ErrorEqual(err, table.ErrTruncateWrongValue), IsTrue)
+
+	tk.MustExec("set @@tidb_skip_utf8_check = '1'")
+	_, err = tk.Exec("insert sc2 values (unhex('4040ffff'))")
+	c.Assert(err, IsNil)
+	tk.MustQuery("select length(a) from sc2").Check(testkit.Rows("2", "4"))
+
+	tk.MustExec("set @@tidb_skip_utf8_check = '0'")
+	runeErrStr := string(utf8.RuneError)
+	tk.MustExec(fmt.Sprintf("insert sc2 values ('%s')", runeErrStr))
 }

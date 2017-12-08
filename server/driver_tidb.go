@@ -14,6 +14,7 @@
 package server
 
 import (
+	"crypto/tls"
 	"fmt"
 
 	"github.com/juju/errors"
@@ -21,7 +22,11 @@ import (
 	"github.com/pingcap/tidb/ast"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/mysql"
-	"github.com/pingcap/tidb/util/types"
+	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util"
+	"github.com/pingcap/tidb/util/auth"
+	"github.com/pingcap/tidb/util/chunk"
+	goctx "golang.org/x/net/context"
 )
 
 // TiDBDriver implements IDriver.
@@ -39,10 +44,9 @@ func NewTiDBDriver(store kv.Storage) *TiDBDriver {
 
 // TiDBContext implements QueryCtx.
 type TiDBContext struct {
-	session      tidb.Session
-	currentDB    string
-	warningCount uint16
-	stmts        map[int]*TiDBStatement
+	session   tidb.Session
+	currentDB string
+	stmts     map[int]*TiDBStatement
 }
 
 // TiDBStatement implements PreparedStatement.
@@ -122,19 +126,18 @@ func (ts *TiDBStatement) Close() error {
 }
 
 // OpenCtx implements IDriver.
-func (qd *TiDBDriver) OpenCtx(connID uint64, capability uint32, collation uint8, dbname string) (QueryCtx, error) {
+func (qd *TiDBDriver) OpenCtx(connID uint64, capability uint32, collation uint8, dbname string, tlsState *tls.ConnectionState) (QueryCtx, error) {
 	session, err := tidb.CreateSession(qd.store)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	session.SetTLSState(tlsState)
+	err = session.SetCollation(int(collation))
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	session.SetClientCapability(capability)
 	session.SetConnectionID(connID)
-	if dbname != "" {
-		_, err = session.Execute("use " + dbname)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-	}
 	tc := &TiDBContext{
 		session:   session,
 		currentDB: dbname,
@@ -164,13 +167,13 @@ func (tc *TiDBContext) SetValue(key fmt.Stringer, value interface{}) {
 }
 
 // CommitTxn implements QueryCtx CommitTxn method.
-func (tc *TiDBContext) CommitTxn() error {
-	return tc.session.CommitTxn()
+func (tc *TiDBContext) CommitTxn(goCtx goctx.Context) error {
+	return tc.session.CommitTxn(goCtx)
 }
 
 // RollbackTxn implements QueryCtx RollbackTxn method.
 func (tc *TiDBContext) RollbackTxn() error {
-	return tc.session.RollbackTxn()
+	return tc.session.RollbackTxn(goctx.TODO())
 }
 
 // AffectedRows implements QueryCtx AffectedRows method.
@@ -185,12 +188,12 @@ func (tc *TiDBContext) CurrentDB() string {
 
 // WarningCount implements QueryCtx WarningCount method.
 func (tc *TiDBContext) WarningCount() uint16 {
-	return tc.warningCount
+	return tc.session.GetSessionVars().StmtCtx.WarningCount()
 }
 
 // Execute implements QueryCtx Execute method.
-func (tc *TiDBContext) Execute(sql string) (rs []ResultSet, err error) {
-	rsList, err := tc.session.Execute(sql)
+func (tc *TiDBContext) Execute(goCtx goctx.Context, sql string) (rs []ResultSet, err error) {
+	rsList, err := tc.session.Execute(goCtx, sql)
 	if err != nil {
 		return
 	}
@@ -206,32 +209,34 @@ func (tc *TiDBContext) Execute(sql string) (rs []ResultSet, err error) {
 	return
 }
 
+// SetSessionManager implements the QueryCtx interface.
+func (tc *TiDBContext) SetSessionManager(sm util.SessionManager) {
+	tc.session.SetSessionManager(sm)
+}
+
 // SetClientCapability implements QueryCtx SetClientCapability method.
 func (tc *TiDBContext) SetClientCapability(flags uint32) {
 	tc.session.SetClientCapability(flags)
 }
 
 // Close implements QueryCtx Close method.
-func (tc *TiDBContext) Close() (err error) {
-	return tc.session.Close()
+func (tc *TiDBContext) Close() error {
+	tc.session.Close()
+	return nil
 }
 
 // Auth implements QueryCtx Auth method.
-func (tc *TiDBContext) Auth(user string, auth []byte, salt []byte) bool {
+func (tc *TiDBContext) Auth(user *auth.UserIdentity, auth []byte, salt []byte) bool {
 	return tc.session.Auth(user, auth, salt)
 }
 
 // FieldList implements QueryCtx FieldList method.
 func (tc *TiDBContext) FieldList(table string) (colums []*ColumnInfo, err error) {
-	rs, err := tc.Execute("SELECT * FROM `" + table + "` LIMIT 0")
+	rs, err := tc.Execute(goctx.Background(), "SELECT * FROM `"+table+"` LIMIT 0")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	colums, err = rs[0].Columns()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return
+	return rs[0].Columns(), nil
 }
 
 // GetStatement implements QueryCtx GetStatement method.
@@ -270,35 +275,49 @@ func (tc *TiDBContext) Prepare(sql string) (statement PreparedStatement, columns
 	return
 }
 
-type tidbResultSet struct {
-	recordSet ast.RecordSet
+// ShowProcess implements QueryCtx ShowProcess method.
+func (tc *TiDBContext) ShowProcess() util.ProcessInfo {
+	return tc.session.ShowProcess()
 }
 
-func (trs *tidbResultSet) Next() ([]types.Datum, error) {
-	row, err := trs.recordSet.Next()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	if row != nil {
-		return row.Data, nil
-	}
-	return nil, nil
+// Cancel implements QueryCtx Cancel method.
+func (tc *TiDBContext) Cancel() {
+	tc.session.Cancel()
+}
+
+type tidbResultSet struct {
+	recordSet ast.RecordSet
+	columns   []*ColumnInfo
+}
+
+func (trs *tidbResultSet) Next(goCtx goctx.Context) (types.Row, error) {
+	return trs.recordSet.Next(goCtx)
+}
+
+func (trs *tidbResultSet) NewChunk() *chunk.Chunk {
+	return trs.recordSet.NewChunk()
+}
+
+func (trs *tidbResultSet) NextChunk(chk *chunk.Chunk) error {
+	return trs.recordSet.NextChunk(chk)
+}
+
+func (trs *tidbResultSet) SupportChunk() bool {
+	return trs.recordSet.SupportChunk()
 }
 
 func (trs *tidbResultSet) Close() error {
 	return trs.recordSet.Close()
 }
 
-func (trs *tidbResultSet) Columns() ([]*ColumnInfo, error) {
-	fields, err := trs.recordSet.Fields()
-	if err != nil {
-		return nil, errors.Trace(err)
+func (trs *tidbResultSet) Columns() []*ColumnInfo {
+	if trs.columns == nil {
+		fields := trs.recordSet.Fields()
+		for _, v := range fields {
+			trs.columns = append(trs.columns, convertColumnInfo(v))
+		}
 	}
-	var columns []*ColumnInfo
-	for _, v := range fields {
-		columns = append(columns, convertColumnInfo(v))
-	}
-	return columns, nil
+	return trs.columns
 }
 
 func convertColumnInfo(fld *ast.ResultField) (ci *ColumnInfo) {
@@ -317,12 +336,34 @@ func convertColumnInfo(fld *ast.ResultField) (ci *ColumnInfo) {
 	} else {
 		ci.ColumnLength = uint32(fld.Column.Flen)
 	}
+	if fld.Column.Tp == mysql.TypeNewDecimal {
+		// Consider the negative sign.
+		ci.ColumnLength++
+		if fld.Column.Decimal > types.DefaultFsp {
+			// Consider the decimal point.
+			ci.ColumnLength++
+		}
+	} else {
+		// Fix issue #4540.
+		// The flen is a hint, not a precise value, so most client will not use the value.
+		// But we found in race MySQL client, like Navicat for MySQL(version before 12) will truncate
+		// the `show create table` result. To fix this case, we must use a large enough flen to prevent
+		// the truncation, in MySQL, it will multiply bytes length by a multiple based on character set.
+		// For examples:
+		// * latin, the multiple is 1
+		// * gb2312, the multiple is 2
+		// * Utf-8, the multiple is 3
+		// * utf8mb4, the multiple is 4
+		// So the large enough multiple is 4 in here.
+		ci.ColumnLength = ci.ColumnLength * mysql.MaxBytesOfCharacter
+	}
+
 	if fld.Column.Decimal == types.UnspecifiedLength {
-		ci.Decimal = 0
+		ci.Decimal = mysql.NotFixedDec
 	} else {
 		ci.Decimal = uint8(fld.Column.Decimal)
 	}
-	ci.Type = uint8(fld.Column.Tp)
+	ci.Type = fld.Column.Tp
 
 	// Keep things compatible for old clients.
 	// Refer to mysql-server/sql/protocol.cc send_result_set_metadata()

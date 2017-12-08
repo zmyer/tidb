@@ -20,11 +20,9 @@ import (
 	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/mysql"
 	"github.com/pingcap/tidb/util/testkit"
-	"github.com/pingcap/tidb/util/testleak"
 )
 
 func (s *testSuite) TestGrantGlobal(c *C) {
-	defer testleak.AfterTest(c)()
 	tk := testkit.NewTestKit(c, s.store)
 	// Create a new user.
 	createUserSQL := `CREATE USER 'testGlobal'@'localhost' IDENTIFIED BY '123';`
@@ -56,7 +54,6 @@ func (s *testSuite) TestGrantGlobal(c *C) {
 }
 
 func (s *testSuite) TestGrantDBScope(c *C) {
-	defer testleak.AfterTest(c)()
 	tk := testkit.NewTestKit(c, s.store)
 	// Create a new user.
 	createUserSQL := `CREATE USER 'testDB'@'localhost' IDENTIFIED BY '123';`
@@ -85,8 +82,21 @@ func (s *testSuite) TestGrantDBScope(c *C) {
 	}
 }
 
+func (s *testSuite) TestWithGrantOption(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
+	// Create a new user.
+	createUserSQL := `CREATE USER 'testWithGrant'@'localhost' IDENTIFIED BY '123';`
+	tk.MustExec(createUserSQL)
+	// Make sure all the db privs for new user is empty.
+	sql := fmt.Sprintf("SELECT * FROM mysql.db WHERE User=\"testWithGrant\" and host=\"localhost\"")
+	tk.MustQuery(sql).Check(testkit.Rows())
+
+	// Grant select priv to the user, with grant option.
+	tk.MustExec("GRANT select ON test.* TO 'testWithGrant'@'localhost' WITH GRANT OPTION;")
+	tk.MustQuery("SELECT grant_priv FROM mysql.DB WHERE User=\"testWithGrant\" and host=\"localhost\" and db=\"test\"").Check(testkit.Rows("Y"))
+}
+
 func (s *testSuite) TestTableScope(c *C) {
-	defer testleak.AfterTest(c)()
 	tk := testkit.NewTestKit(c, s.store)
 	// Create a new user.
 	createUserSQL := `CREATE USER 'testTbl'@'localhost' IDENTIFIED BY '123';`
@@ -125,7 +135,6 @@ func (s *testSuite) TestTableScope(c *C) {
 }
 
 func (s *testSuite) TestColumnScope(c *C) {
-	defer testleak.AfterTest(c)()
 	tk := testkit.NewTestKit(c, s.store)
 	// Create a new user.
 	createUserSQL := `CREATE USER 'testCol'@'localhost' IDENTIFIED BY '123';`
@@ -163,4 +172,30 @@ func (s *testSuite) TestColumnScope(c *C) {
 		p := fmt.Sprintf("%v", row[0])
 		c.Assert(strings.Index(p, mysql.Priv2SetStr[v]), Greater, -1)
 	}
+}
+
+func (s *testSuite) TestIssue2456(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
+	tk.MustExec("CREATE USER 'dduser'@'%' IDENTIFIED by '123456';")
+	tk.MustExec("GRANT ALL PRIVILEGES ON `dddb_%`.* TO 'dduser'@'%';")
+	tk.MustExec("GRANT ALL PRIVILEGES ON `dddb_%`.`te%` to 'dduser'@'%';")
+}
+
+func (s *testSuite) TestCreateUserWhenGrant(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
+	tk.MustExec("DROP USER IF EXISTS 'test'@'%'")
+	tk.MustExec("GRANT ALL PRIVILEGES ON *.* to 'test'@'%' IDENTIFIED BY 'xxx'")
+	// Make sure user is created automatically when grant to a non-exists one.
+	tk.MustQuery("SELECT user FROM mysql.user WHERE user='test' and host='%'").Check(
+		testkit.Rows("test"),
+	)
+}
+
+func (s *testSuite) TestIssue2654(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
+	tk.MustExec("DROP USER IF EXISTS 'test'@'%'")
+	tk.MustExec("CREATE USER 'test'@'%' IDENTIFIED BY 'test'")
+	tk.MustExec("GRANT SELECT ON test.* to 'test'")
+	rows := tk.MustQuery("SELECT user,host FROM mysql.user WHERE user='test' and host='%'")
+	rows.Check(testkit.Rows("test %"))
 }
